@@ -1,0 +1,12 @@
+[Unit]
+Description=Cap the PropDop log files hourly
+
+[Timer]
+# Hourly rather than daily: the cap is a size, and a chatty hour should not be able to
+# overrun it by a whole day's output before anyone checks.
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

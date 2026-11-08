@@ -1,0 +1,7 @@
+[Unit]
+Description=Cap the PropDop log files
+
+[Service]
+Type=oneshot
+ExecStart=%h/propdop/repo/deploy/rotate-logs.sh %h/propdop/data/logs/propdop.log
+ExecStart=%h/propdop/repo/deploy/rotate-logs.sh %h/propdop/data/logs/propdop-web.log
