@@ -387,3 +387,41 @@ def test_station_hardware_reaches_the_database(tmp_path):
         assert row["station_id"] == "home" and row["lat"] == pytest.approx(RX.lat)
     finally:
         p.stop()
+
+
+def test_a_rejected_high_scoring_candidate_keeps_its_audio(tmp_path, monkeypatch):
+    """A negative that scored above the threshold must stay reproducible.
+
+    The archive ring is 30 minutes, so by the time anyone reads a "scored, screened out" row
+    the audio is gone and the stored reason cannot be checked against anything. The deployed
+    station produced exactly that: a Cirrus SR22T at 4.25 km scoring 27.8, rejected, with no
+    way to find out why.
+    """
+    from propdop import detect as detect_mod
+
+    samples, _ = scene_with_one_pass(t_heard=200.0)
+    p = pipeline.Pipeline(make_config(tmp_path, analyse_in_process=True),
+                          source=node.SyntheticSource(samples, nominal_rate=8000))
+
+    real = detect_mod.detect
+
+    def reject_everything(*a, **kw):
+        dets = real(*a, **kw)
+        for d in dets:
+            d.is_aircraft, d.reason = False, "poor fit (epsilon 3.50%, contrast 0.01)"
+        return dets
+
+    monkeypatch.setattr(detect_mod, "detect", reject_everything)
+    try:
+        p.node.clock.t0 = 0.0
+        p.node.pump(blocks=600)
+        out = p.analyse_once(seconds=600.0)
+        assert out["matched"] == 0 and out["unexplained"] == 0, "fixture must reject everything"
+
+        clips = sorted((tmp_path / "corpus" / "near_miss").glob("*.flac"))
+        assert clips, "a rejected candidate above the threshold must leave audio behind"
+        assert clips[0].name.startswith("nearmiss_")
+        # and it must not be filed as a real pass
+        assert not list((tmp_path / "corpus").glob("pass_*.flac"))
+    finally:
+        p.stop()

@@ -72,6 +72,14 @@ def _analysis_worker(payload: dict):
         "n_tracks": len(tracks),
         "n_candidates": len(geoms),
         # Carried back so the parent can score its own (window-clamped) unheard list.
+        # Every candidate with its screening verdict, so a stored negative can say *why* a
+        # scoring candidate was rejected rather than only that one existed.
+        "candidates": [
+            {"t0": float(d.t0_heard), "score": float(d.template_score),
+             "is_aircraft": bool(d.is_aircraft), "reason": str(d.reason)[:120],
+             "f0": float(d.f0), "speed": float(d.speed), "cpa_m": float(d.cpa_distance)}
+            for d in dets
+        ],
         "score_times": diag.get("times"),
         "score_best": diag.get("best_score"),
         "peak_score": diag.get("peak_score"),
@@ -106,6 +114,11 @@ class PipelineConfig:
     analysis_window_s: float = 420.0
     corpus_dir: str | None = None
     corpus_limit_bytes: int = 750_000_000
+    # A rejected candidate that scored above the threshold is the most informative thing the
+    # station produces and the hardest to reproduce: the archive ring is 30 minutes, so by the
+    # time anyone reads the row the audio is gone. Kept in its own directory under its own cap
+    # so diagnostics can never crowd out the pass corpus.
+    near_miss_fraction: float = 0.2
     dedup_window_s: float = 20.0
     status_path: str | None = None
     spectrogram_path: str | None = None
@@ -453,15 +466,40 @@ class Pipeline:
             (g.icao24, round(g.t_heard_cpa, 1)): detect.best_score_near(diag, g.t_heard_cpa)
             for g in result.unheard
         }
+        rejected = [c for c in (out.get("candidates") or []) if not c["is_aircraft"]]
+        unheard_reasons = {}
+        for g in result.unheard:
+            near = [c for c in rejected
+                    if abs(c["t0"] - g.t_heard_cpa) <= detect.SCORE_WINDOW_S]
+            if near:
+                unheard_reasons[(g.icao24, round(g.t_heard_cpa, 1))] = max(
+                    near, key=lambda c: c["score"]
+                )["reason"]
 
         counts = self.db.record_join(
             self.cfg.station_id,
             result,
             blade_counts=self.db.infer_blade_counts(),
             unheard_scores=unheard_scores,
+            unheard_reasons=unheard_reasons,
         )
         for d in aircraft:
             self._save_corpus_clip(d, audio, rate, t_offset)
+
+        # Keep the audio behind every "scored, screened out" negative. Without it the stored
+        # reason is a sentence with nothing to check it against, and the deployed station
+        # produced exactly that: a Cirrus at 4.25 km scoring 27.8, rejected, unreproducible.
+        from types import SimpleNamespace
+
+        for c in sorted(rejected, key=lambda c: -c["score"])[:3]:
+            if c["score"] < detect.MIN_TEMPLATE_SCORE:
+                break
+            self._save_corpus_clip(
+                SimpleNamespace(t0_heard=c["t0"], f0=c["f0"], speed=c["speed"],
+                                cpa_distance=c["cpa_m"]),
+                audio, rate, t_offset, subdir="near_miss",
+                limit=int(self.cfg.corpus_limit_bytes * self.cfg.near_miss_fraction),
+            )
 
         self.stats["analyses"] += 1
         self.stats["passes_stored"] += counts["matched"] + counts["unexplained"]
@@ -487,7 +525,7 @@ class Pipeline:
         ).fetchone()
         return row is not None
 
-    def _save_corpus_clip(self, det, audio, rate, t_offset) -> None:
+    def _save_corpus_clip(self, det, audio, rate, t_offset, subdir=None, limit=None) -> None:
         """Keep the audio for a detected pass, within the capped corpus.
 
         Per BUILD.md 2 the corpus exists to re-run the DSP against known input, not to hoard.
@@ -499,19 +537,21 @@ class Pipeline:
         try:
             import soundfile as sf
 
-            d = Path(self.cfg.corpus_dir)
+            d = Path(self.cfg.corpus_dir) / subdir if subdir else Path(self.cfg.corpus_dir)
             d.mkdir(parents=True, exist_ok=True)
+            limit = self.cfg.corpus_limit_bytes if limit is None else limit
             half = float(np.clip(2.0 * det.cpa_distance / max(det.speed, 1.0), 20.0, 90.0))
             i0 = int(max(0, (det.t0_heard - t_offset - half) * rate))
             i1 = int(min(audio.size, (det.t0_heard - t_offset + half) * rate))
             if i1 - i0 < rate * 5:
                 return
-            path = d / f"pass_{int(det.t0_heard)}_{int(det.f0)}hz.flac"
+            stem = "nearmiss" if subdir else "pass"
+            path = d / f"{stem}_{int(det.t0_heard)}_{int(det.f0)}hz.flac"
             if not path.exists():
                 sf.write(path, audio[i0:i1], rate, format="FLAC")
             files = sorted(d.glob("*.flac"), key=lambda p: p.stat().st_mtime)
             total = sum(p.stat().st_size for p in files)
-            while total > self.cfg.corpus_limit_bytes and files:
+            while total > limit and files:
                 victim = files.pop(0)
                 total -= victim.stat().st_size
                 victim.unlink(missing_ok=True)

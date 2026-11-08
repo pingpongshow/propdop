@@ -804,17 +804,18 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
         cand_rows = db.recent_unheard(limit=10)
         if cand_rows:
             cand = (
-                "<table><tr><th>expected</th><th>type</th><th>range</th><th>bearing</th>"
-                "<th>score</th><th>verdict</th></tr>"
+                "<table><tr><th>expected</th><th>type</th><th>eng</th><th>range</th>"
+                "<th>bearing</th><th>score</th><th>verdict</th><th>why rejected</th></tr>"
                 + "".join(
                     f"<tr><td>{_clock(r['t_heard_cpa'], '%H:%M:%S')}</td>"
                     f"<td>{_esc(r.get('type_code') or '&mdash;')}</td>"
+                    f"<td>{_esc({'J': 'jet', 'T': 'turbo', 'P': 'piston'}.get(r.get('engine_class') or '', '&mdash;'))}</td>"
                     f"<td>{_fmt((r.get('adsb_slant_m') or 0) / 1000, 1)} km</td>"
                     f"<td>{_fmt(r.get('adsb_bearing_deg'), 0)}&deg;</td>"
                     f"<td>{_fmt(r.get('best_template_score'), 1)}</td>"
                     f"<td class=\"mut\">"
                     f"{_esc(detect.score_verdict(_score(r.get('best_template_score'))))}"
-                    f"</td></tr>"
+                    f"</td><td class=\"mut\">{_esc(r.get('reject_reason') or '&mdash;')}</td></tr>"
                     for r in cand_rows
                 )
                 + "</table>"

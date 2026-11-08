@@ -123,6 +123,10 @@ CREATE TABLE IF NOT EXISTS unheard (
     -- Best blind-detector score anywhere near the expected arrival, stored even though it
     -- failed to clear the threshold. A negative without this number is uninterpretable.
     best_template_score REAL,
+    -- Why the best scoring candidate near this arrival was not accepted. Without it,
+    -- "scored, screened out" is a verdict with no diagnosis attached.
+    reject_reason     TEXT,
+    engine_class      TEXT,
     UNIQUE (station_id, t_heard_cpa, icao24)
 );
 
@@ -277,7 +281,8 @@ class Store:
                 "scint_exponent": "REAL",
                 "freq_coherence": "REAL",
             },
-            "unheard": {"adsb_bearing_deg": "REAL", "best_template_score": "REAL"},
+            "unheard": {"adsb_bearing_deg": "REAL", "best_template_score": "REAL",
+                        "reject_reason": "TEXT", "engine_class": "TEXT"},
         }
         for table, cols in wanted.items():
             have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -399,14 +404,16 @@ class Store:
         return int(cur.lastrowid)
 
     def add_unheard(
-        self, station_id: str, geom: adsb.PassGeometry, best_score: float | None = None
+        self, station_id: str, geom: adsb.PassGeometry, best_score: float | None = None,
+        reject_reason: str | None = None,
     ) -> None:
         if best_score is not None and not np.isfinite(best_score):
             best_score = None       # NaN round-trips through SQLite as a float, not as NULL
         self.execute(
             "INSERT OR REPLACE INTO unheard (station_id, t_heard_cpa, icao24, type_code,"
             " adsb_speed_mps, adsb_slant_m, adsb_agl_m, adsb_bearing_deg,"
-            " best_template_score) VALUES (?,?,?,?,?,?,?,?,?)",
+            " best_template_score, reject_reason, engine_class)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 station_id,
                 geom.t_heard_cpa,
@@ -417,6 +424,8 @@ class Store:
                 geom.altitude_agl_m,
                 geom.bearing_deg,
                 best_score,
+                reject_reason,
+                geom.track.engine_class if geom.track else None,
             ),
         )
         with self._lock:
@@ -429,11 +438,13 @@ class Store:
         blade_counts: dict[str, int] | None = None,
         surface: dict | None = None,
         unheard_scores: dict | None = None,
+        unheard_reasons: dict | None = None,
     ) -> dict:
         """Persist a whole join: matches, unexplained detections and unheard passes.
 
         `unheard_scores` maps `(icao24, round(t_heard_cpa, 1))` to the best detector score
-        near that arrival, so each negative is stored with the evidence behind it.
+        near that arrival, and `unheard_reasons` to why the best candidate there was rejected,
+        so each negative is stored with the evidence behind it.
         """
         blade_counts = blade_counts or {}
         n_matched = n_unexplained = 0
@@ -457,8 +468,10 @@ class Store:
                 )
                 n_unexplained += 1
         for g in result.unheard:
+            key = (g.icao24, round(g.t_heard_cpa, 1))
             self.add_unheard(
-                station_id, g, (unheard_scores or {}).get((g.icao24, round(g.t_heard_cpa, 1)))
+                station_id, g, (unheard_scores or {}).get(key),
+                (unheard_reasons or {}).get(key),
             )
         return {
             "matched": n_matched,
@@ -644,7 +657,8 @@ class Store:
         """
         rows = self.query_all(
             "SELECT t_heard_cpa, icao24, type_code, adsb_speed_mps, adsb_slant_m,"
-            " adsb_agl_m, adsb_bearing_deg, best_template_score FROM unheard"
+            " adsb_agl_m, adsb_bearing_deg, best_template_score, reject_reason,"
+            " engine_class FROM unheard"
             " ORDER BY t_heard_cpa DESC LIMIT ?",
             (int(limit),),
         )

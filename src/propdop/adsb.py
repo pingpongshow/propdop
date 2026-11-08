@@ -20,6 +20,71 @@ from . import geo, physics
 # ICAO Doc 8643 type designators encode engine count and type (L1P, L2T, ...), not blade count.
 JET_CLASSES = frozenset({"J", "R"})
 
+# Doc 8643's engine letter is not in the ADS-B feed. adsb.lol and readsb publish the type
+# designator (`t`) and the emitter category, but no `desc`, so `engine_class` stayed None for
+# every live track and `is_jet` was therefore always False. `audible_candidates(exclude_jets=
+# True)` silently excluded nothing: on the deployed station 10 of 12 "should have been
+# audible" rows were airliners, which the detector is a propeller comb filter and cannot hear.
+#
+# This table is the common traffic, not all of Doc 8643. Anything absent resolves to None and
+# is treated as a possible propeller, which is the conservative direction: the cost is an
+# unheard row that should not exist, not a missed detection.
+_ENGINE_CLASS_BY_TYPE: dict[str, str] = {}
+
+
+def _register(cls: str, codes: str) -> None:
+    for code in codes.split():
+        _ENGINE_CLASS_BY_TYPE[code] = cls
+
+
+_register("J", """
+    A19N A20N A21N A318 A319 A320 A321 A332 A333 A337 A338 A339 A342 A343 A345 A346
+    A359 A35K A388 A3ST BCS1 BCS3 B37M B38M B39M B3XM B703 B712 B720 B721 B722 B731
+    B732 B733 B734 B735 B736 B737 B738 B739 B741 B742 B743 B744 B748 B752 B753 B762
+    B763 B764 B772 B773 B77L B77W B788 B789 B78X E135 E145 E170 E175 E190 E195 E290
+    E295 E45X E50P E545 E550 E55P E75L E75S CRJ1 CRJ2 CRJ7 CRJ9 CRJX C25A C25B C25C
+    C500 C510 C525 C550 C560 C56X C650 C680 C68A C700 C750 CL30 CL35 CL60 GLEX GL5T
+    GLF4 GLF5 GLF6 G280 GALX H25B HDJT LJ31 LJ35 LJ40 LJ45 LJ55 LJ60 LJ70 LJ75 F2TH
+    FA50 FA7X FA8X PRM1 BE40 SF50 MD11 MD81 MD82 MD83 MD87 MD88 MD90 DC10 B461 B462
+    B463 RJ85 RJ1H F70 F100
+""")
+_register("T", """
+    AT43 AT44 AT45 AT46 AT72 AT73 AT75 AT76 ATP DH8A DH8B DH8C DH8D DHC6 DHC7 SF34
+    SB20 SW2 SW3 SW4 JS31 JS32 JS41 B190 BE20 BE9L BE99 B350 C208 C212 C441 D228 D328
+    E110 E120 F406 L410 PC12 PC6T PC21 TBM7 TBM8 TBM9 TBM0 AC90 AC95 P180 P46T PAY1
+    PAY2 PAY3 PAY4 MU2 Y12 CN35 C295 AN26 AN32 C130 C30J LCH DC3T
+""")
+_register("P", """
+    AA1 AA5 AC11 AC50 AEST BE23 BE24 BE33 BE35 BE36 BE50 BE55 BE58 BE60 BE76 BE95
+    C150 C152 C162 C170 C172 C175 C177 C180 C182 C185 C188 C195 C206 C207 C210 C310
+    C336 C337 C340 C402 C404 C411 C414 C421 CH7A CH70 COL4 DA20 DA36 DA40 DA42 DA50
+    DA62 DR40 EVSS G115 GA7 GA8 GLAS GY80 J3 L4 M20P M20T M5 M7 NAVI P28A P28B P28R
+    P28S P28T P32R P32T P46T PA11 PA12 PA16 PA18 PA20 PA22 PA23 PA24 PA25 PA27 PA28
+    PA30 PA31 PA32 PA34 PA38 PA39 PA44 PA46 PITT RV3 RV4 RV6 RV7 RV8 RV9 RV10 RV12
+    RV14 S22T SR20 SR22 ST75 SUBA T206 T210 T303 T310 TOBA TRIN U206 V35 BL8 BT36
+""")
+_register("T", """
+    A109 A119 A139 A169 A189 AS32 AS50 AS55 AS65 B06 B06T B222 B230 B407 B412 B427
+    B429 B430 B505 BK17 EC20 EC25 EC30 EC35 EC45 EC55 EC75 H500 H60 MD52 MD60 MD90H
+    R66 S64 S76 S92 UH1 S61 S70
+""")
+_register("P", "R22 R44 EN28 H269 S269 SCHW")
+
+
+def engine_class_for_type(type_code: str | None, category: str | None = None) -> str | None:
+    """Doc 8643 engine letter for an ICAO type designator, or None if not known.
+
+    `category` is the ADS-B emitter category and is only consulted as a fallback, because it
+    encodes *size* rather than engine type: A1 (light) and A2 (small) contain both pistons and
+    light jets, so only the large-transport categories are decisive.
+    """
+    code = (type_code or "").strip().upper()
+    if code in _ENGINE_CLASS_BY_TYPE:
+        return _ENGINE_CLASS_BY_TYPE[code]
+    if (category or "").strip().upper() in {"A3", "A4", "A5"}:
+        return "J"      # large, high-vortex-large and heavy are transports: jets in practice
+    return None
+
 
 @dataclass
 class Track:
@@ -210,6 +275,7 @@ def tracks_from_readsb(
                     "datum": set(),
                     "reg": None,
                     "type": None,
+                    "cat": None,
                 },
             )
             rec["t"].append(t)
@@ -220,6 +286,7 @@ def tracks_from_readsb(
             rec["datum"].add(datum)
             rec["reg"] = rec["reg"] or ac.get("r")
             rec["type"] = rec["type"] or ac.get("t")
+            rec["cat"] = rec["cat"] or ac.get("category")
 
     tracks = []
     for icao, rec in by_icao.items():
@@ -234,7 +301,8 @@ def tracks_from_readsb(
                 alt_hae_m=np.array(rec["alt"]),
                 registration=rec["reg"],
                 type_code=rec["type"],
-                meta={"alt_datum": sorted(rec["datum"])},
+                engine_class=engine_class_for_type(rec["type"], rec["cat"]),
+                meta={"alt_datum": sorted(rec["datum"]), "category": rec["cat"]},
             )
         )
     return tracks
