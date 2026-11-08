@@ -186,6 +186,8 @@ def tracks_from_readsb(
     by_icao: dict[str, dict[str, list]] = {}
     for snap in snapshots:
         now = float(snap.get("now", 0.0))
+        if now > 1e11:  # millisecond timestamps, as adsb.lol serves them
+            now /= 1000.0
         for ac in snap.get("aircraft", []):
             icao = ac.get("hex")
             lat, lon = ac.get("lat"), ac.get("lon")
@@ -393,9 +395,23 @@ def fetch_adsb_lol(
 
 
 def normalise_adsb_lol(payload: dict) -> dict:
-    """adsb.lol v2 uses `ac`; readsb uses `aircraft`. Otherwise the fields line up."""
+    """adsb.lol v2 uses `ac`; readsb uses `aircraft`. Otherwise the fields line up.
+
+    **Except the units of `now`.** adsb.lol returns it in *milliseconds* while `seen_pos` on
+    each aircraft stays in *seconds* -- so taking `now` at face value stretches every track's
+    time span by 1000x, divides every speed by 1000, and puts the timestamps in a different
+    epoch entirely from the audio.
+
+    The failure is silent and total: a 90 m/s aircraft reports 0.09 m/s, every track is then
+    dropped by the >=30 m/s audibility filter, and the join produces nothing at all while every
+    component reports success. Normalise here rather than downstream, so there is exactly one
+    place where the convention is decided.
+    """
+    now = float(payload.get("now", 0.0))
+    if now > 1e11:  # seconds since 1970 will not reach 1e11 until the year 5138
+        now /= 1000.0
     return {
-        "now": float(payload.get("now", 0.0)),
+        "now": now,
         "aircraft": payload.get("ac") or payload.get("aircraft") or [],
     }
 

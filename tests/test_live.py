@@ -243,3 +243,58 @@ def test_node_runs_on_an_alsa_style_source(monkeypatch):
     window, _ = nd.read_window(5.0, 55.0)
     assert window.size == pytest.approx(50 * fo.sample_rate, abs=2)
     assert float(np.sqrt((window**2).mean())) > 0.01
+
+
+def test_millisecond_timestamps_are_normalised():
+    """adsb.lol serves `now` in milliseconds while `seen_pos` stays in seconds.
+
+    Taken at face value this stretches every track's time span by 1000x and divides every
+    speed by 1000, so a 90 m/s aircraft reports 0.09 m/s and is then dropped by the >=30 m/s
+    audibility filter. The join produces nothing while every component reports success -- which
+    is exactly what happened in deployment, for hours, undetected.
+    """
+    ms = 1794098122501.0
+    snap = adsb.normalise_adsb_lol({"now": ms, "ac": []})
+    assert snap["now"] == pytest.approx(ms / 1000.0)
+    # a source already in seconds must be left alone
+    assert adsb.normalise_adsb_lol({"now": 1794098122.5, "ac": []})["now"] == pytest.approx(
+        1794098122.5
+    )
+
+
+def test_speed_survives_millisecond_timestamps_end_to_end():
+    """The check that would have caught it: build tracks from millisecond snapshots and
+    confirm the implied speed is aviation-plausible rather than a thousandth of it."""
+    from propdop import geo
+
+    rx = geo.Receiver(lat=51.23, lon=-0.98, elevation_msl_m=68.0, geoid_offset_m=46.0)
+    truth = adsb.synthetic_track(rx, 90.0, 2500.0, 2000.0, heading_deg=40.0, t_cpa=0.0,
+                                 half_span_s=60.0, rate_hz=1.0)
+    base_ms = 1794098122501.0
+    snaps = []
+    for i in range(8):
+        t = -40.0 + i * 12.0
+        snaps.append(
+            adsb.normalise_adsb_lol(
+                {
+                    "now": base_ms + (t + 40.0) * 1000.0,
+                    "ac": [
+                        {
+                            "hex": "aa0001", "t": "C172", "r": "N1", "seen_pos": 0.2,
+                            "lat": float(np.interp(t, truth.times, truth.lat)),
+                            "lon": float(np.interp(t, truth.times, truth.lon)),
+                            "alt_geom": float(
+                                np.interp(t, truth.times, truth.alt_hae_m) / 0.3048
+                            ),
+                        }
+                    ],
+                }
+            )
+        )
+    tracks = adsb.tracks_from_readsb(snaps)
+    assert len(tracks) == 1
+    g = adsb.pass_geometry(tracks[0], rx)
+    assert g is not None
+    assert g.speed_mps == pytest.approx(90.0, rel=0.25), f"got {g.speed_mps:.2f} m/s"
+    # and it must now survive the audibility filter that was silently rejecting everything
+    assert adsb.audible_candidates(tracks, rx)
