@@ -3,6 +3,9 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Local tooling state, not project content.
+.claude/
+
 # --- never commit: host-specific notes --------------------------------------------
 # These describe one particular private server in detail -- hardware inventory, pool sizes,
 # installed services, hostnames. Useful locally, nobody else's business.

@@ -1,11 +1,12 @@
-# PropDop on server. All persistent state under ./data, matching the convention
+# PropDop under Docker. All persistent state lives on a host directory bind-mounted at /data,
+# so the image stays disposable. Point the volumes below at wherever you keep container state.
 # the other applications on this host use.
 #
-#   ./data/db        pass database (SQLite; ~0.3 GB/year at 15 kB/pass)
-#   ./data/corpus    retest corpus, capped at 1 GB (BUILD.md 2)
-#   ./data/archive   rolling decimated archive, self-expiring (~2 GB)
-#   ./data/config    station config, including the required geoid offset
-#   ./data/adsb      readsb state
+#   <host dir>/db        pass database (SQLite; ~0.3 GB/year at 15 kB/pass)
+#   <host dir>/corpus    retest corpus, capped at 1 GB (BUILD.md 2)
+#   <host dir>/archive   rolling decimated archive, self-expiring (~2 GB)
+#   <host dir>/config    station config, including the required geoid offset
+#   <host dir>/adsb      readsb state
 #
 # There is no GPU service: the workload is CPU-bound and the 5090 earns nothing here.
 # There is no adsb.lol archive fetcher: a local receiver makes it unnecessary.

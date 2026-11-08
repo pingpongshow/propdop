@@ -1,5 +1,5 @@
 # PropDop. CPU-bound: there is deliberately no CUDA stage, because the workload does not use
-# the GPU (BUILD.md 4). Deployed on server with all state under ./data.
+# the GPU (BUILD.md 4). All state lives on a bind-mounted host directory, not in the image.
 FROM python:3.13-slim AS base
 
 # libsndfile for soundfile; ffmpeg only for decoding container formats a node might hand us
@@ -17,7 +17,7 @@ COPY src ./src
 RUN pip install --no-cache-dir ".[web]"
 
 # The container owns no state. Everything persistent is bind-mounted from
-# ./data, so the image is disposable and the data survives a rebuild.
+# the mounted host directory, so the image is disposable and the data survives a rebuild.
 VOLUME ["/data"]
 
 RUN useradd --create-home --uid 1000 propdop && chown -R propdop /app

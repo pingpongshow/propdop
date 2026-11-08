@@ -36,7 +36,7 @@ caps every single one.
 | **Blind detector** *(built: `propdop.detect`)* | Runs continuously over all audio — the primary and only detection path. ADS-B Out is not required in Class G below 10,000 ft, so this is also the only route to non-transmitting aircraft. Includes `plausible_aircraft` ground-source rejection (DESIGN §3.1a) |
 | **Pass database** *(built: `propdop.store`)* | TimescaleDB: one row per pass per node, plus the derived tracks (§2) |
 | **Validation harness** | Speed and slant range against ADS-B, as a distribution over hundreds of passes, plus an **empirical** error model — the fit's own error bars are ~5× overconfident ([APPLICATIONS.md §2](APPLICATIONS.md)) |
-| **Container** *(built: `Dockerfile`, `docker-compose.yml`)* | Deployed on server with **all state under `./data`** — `db/`, `corpus/`, `archive/`, `config/`, `adsb/`. No GPU service, no archive fetcher. The image is disposable; data survives rebuilds |
+| **Container** *(built: `Dockerfile`, `docker-compose.yml`)* | Deployed with **all state on a bind-mounted host directory at `/data`** — `db/`, `corpus/`, `archive/`, `config/`, `adsb/`. No GPU service, no archive fetcher. The image is disposable; data survives rebuilds |
 | **Web UI** *(built: `propdop.web`)* | Live passes, spectrogram with fit overlaid, `ε` over time, validation plots, and each product's current value with its confidence (§3) |
 
 **Container layout** is [DESIGN.md §3.4](DESIGN.md), minus the GPU worker — CPU-bound workload, the 5090

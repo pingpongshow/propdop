@@ -1,6 +1,6 @@
 """Command line entry point -- what the container runs.
 
-Deployed on the server server, everything lives under `./data`, matching the
+Under Docker everything lives under the bind-mounted `/data`, matching the
 convention the other applications on that host use. Paths are overridable so the same image
 runs on a laptop.
 """
@@ -17,6 +17,8 @@ import numpy as np
 
 from . import __version__, adsb, associate, detect, fit, geo, store
 
+# Relative by default so a fresh clone works without configuration; the container and the
+# systemd unit both set PROPDOP_DATA explicitly, so this default is only for local use.
 DATA_ROOT = Path(os.environ.get("PROPDOP_DATA", "./data"))
 
 
