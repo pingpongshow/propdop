@@ -214,3 +214,255 @@ regression that AeroSonicDB could not see; AeroSonicDB caught the threshold and 
 miscalibration the synthetics could not; and the live station caught an incoherence neither
 corpus would ever contain, because only a real deployment produces an unmatched detection with
 nothing to check it against.
+
+## The fault that made every number on this page inapplicable to the station
+
+Three hours later the station had thirteen detections, **every one of them unmatched**, and a
+detection rate of 0.0 %. Four candidates were stored as `poor fit (epsilon 3.05–3.67 %)`.
+
+The near-miss audio retention added in the previous round is what made this diagnosable: the
+clips behind two of those rejections were on disk. Re-running the detector on them did not
+reproduce the rejection. It produced `ε` of **0.20 %** and **0.63 %** — against 3.13 % and
+3.67 % recorded live, on the same audio.
+
+The first hypothesis was an octave slip. `detect` derives the fit band from the template-stage
+`f0` as `(f0·0.6, f0·1.7)`, so a sub-octave lock would put the true fundamental outside the
+band the fit is allowed to search, and one clip's filename said 81 Hz where the re-run found
+165 Hz. **That was real and it was not the cause.** Refitting at the sub-octave band still gave
+geometry that matched ADS-B; the octave does not decide this.
+
+The cause is that **`fit_comb`'s answer depended on `t_offset`**. Same audio, same band:
+
+| `t_offset` | f0 | speed | cpa | ε |
+|---|---|---|---|---|
+| 0 … 1e6 | 162.6 Hz | 69.5 m/s | 1,941 m | **0.50 %** |
+| 1e8 | 162.6 Hz | 69.5 m/s | 1,936 m | 0.50 % |
+| 1.794e9 *(live)* | 172.0 Hz | **23.4 m/s** | **197 m** | 1.24 % |
+
+`t_offset` labels the time axis. It must shift `t0_heard` and change nothing else.
+
+`fit_straight_pass` calls `least_squares` with the default `x_scale=1.0`, so the step test is
+`‖dx‖ < xtol·(xtol + ‖x‖)` over the whole parameter vector `[f0, speed, cpa, t0]`. With an
+absolute unix time as `t0`, `‖x‖ ≈ 1.79e9` and that tolerance becomes **≈18** — the solver
+stops after one or two steps. It then returns `status=3`, which is success, so every caller
+saw `converged=True` on a fit that never moved. `comb_score` was worse: it was handed
+clip-local ridge times together with an absolute `t0`, so every `t − t0` it formed was out by
+1.79e9, and the contrast it reported — including the `-0.19` logged beside one of these
+rejections — was noise.
+
+### What it cost, measured against truth
+
+The Cirrus SR22T at 05:15, stored as *"poor fit (epsilon 3.13 %)"*:
+
+| | speed err | slant err | Δt | chi |
+|---|---|---|---|---|
+| as flown live | −61.3 % | −91.8 % | −7.1 s | 7.53 → discarded |
+| local time frame | **+0.3 %** | **−2.4 %** | **+0.1 s** | **0.11 → joins** |
+
+Against `MAX_CHI = 3.0`. The acoustic fit reproduces the ADS-B speed to three parts in a
+thousand and the slant range to 2.4 %, and the instrument threw it away.
+
+### Why 2,135 clips could not see it
+
+`run_aerosonicdb.py` calls `detect.detect(...)` without `t_offset`, so it defaults to 0.0. The
+live pipeline passes `node.archive_time_of(first)` — an absolute unix time. **68.2 % detection
+on the corpus and thirteen consecutive misses on the station are both true, and one argument
+separates them.** No corpus of clips can produce an absolute timestamp, so no corpus run could
+have caught this.
+
+The harness now takes `--t-offset`, and the whole corpus was re-scored at both values. That
+turns a two-clip observation into a 2,135-clip regression test:
+
+| | `t_offset = 0` | `t_offset = 1.794e9` |
+|---|---|---|
+| propeller detected | 103 / 151 | 103 / 151 |
+| turbofans fired on | 2 / 474 | 2 / 474 |
+| false positives, 51 s label-verified | 0 / 274 | 0 / 274 |
+| false positives, 10 s curated | 0 / 1,236 | 0 / 1,236 |
+| **verdict flips** | | **0** |
+
+2,134 of 2,135 clips are bit-identical; one jet clip differs by a single candidate near the
+collect floor, which changes nothing at the deployed threshold. The headline numbers on this
+page are therefore unchanged by the fix, which is what makes them comparable — and they now
+describe the deployed station as well as the corpus, which they did not before.
+
+### Epsilon is not accuracy, and that is the more general lesson
+
+That chi-0.11 pass carries **ε = 2.97 %** — three hundredths of a point below the gate that
+rejects at 3.0 %. Shortening the fit window drives ε *down* while the geometry gets *worse*:
+
+| window | ε | speed err vs ADS-B | slant err vs ADS-B |
+|---|---|---|---|
+| 40 s | 0.50 % | +4.8 % | +5.8 % |
+| 30 s | 0.19 % | −22.7 % | −45.3 % |
+| 20 s | **0.14 %** | **−29.4 %** | **−53.3 %** |
+
+A truncated sweep gives the model less to explain, so it explains it beautifully and wrongly.
+ε measures how well the model fits what it was shown, not whether the answer is right. Since
+`atmos.sample_from_match` sets `sigma` from ε and weights by `1/sigma²`, the inversion gives
+the **highest weight to the most truncated fits**. `MAX_EPSILON` is unchanged at 0.03 — it was
+calibrated on this corpus, in the healthy regime, and still separates the misfitting car — but
+it should not be the last word on a detection that ADS-B can identify, which is why the join
+now runs first.
+
+### Two more faults the same review turned up
+
+**No ICAO type designator ever resolved to `"R"`.** `NON_PROPELLER_CLASSES` and
+`store.detection_rate`'s `NOT IN ('J','R')` both existed, but all 45 rotorcraft types were
+registered by Doc 8643 engine letter as `T` or `P`, so the rotorcraft exclusion was dead code
+in every path. The station put an AS350 at 1,173 m into the propeller denominator four times;
+its score of 53.9 is the highest unheard row in the database. Emitter category **A7** is now a
+fallback, and `P46T` no longer appears in two blocks with the later one winning.
+
+### Confirmed live: the first ADS-B match the station has ever made
+
+Ten minutes after the fix was deployed, `a6b080` — a low, slow aircraft broadcasting no type
+code — passed at 953 m:
+
+| | acoustic fit | ADS-B | error |
+|---|---|---|---|
+| speed | 32.1 m/s | 32.7 m/s | **−1.8 %** |
+| slant range | 853 m | 953 m | **−10.5 %** |
+| chi | | | **0.45** (threshold 3.0) |
+
+Thirteen passes before the fix matched nothing at all. This one is stored `source=matched`,
+and the detection rate reads **9.1 %** rather than 0.0 % or the meaningless 14.3 %.
+
+**It was screened out and kept anyway.** Its note reads `screened out, kept on ADS-B: poor fit
+(epsilon 3.07%)` — three hundredths of a percent over the gate. Under the previous order of
+operations this pass would have been discarded on that number and filed twice as a failure:
+once as an unexplained detection, once as an aircraft that should have been heard and was not.
+Joining first is what kept it, and the row that proves it exists only because the disagreement
+is now recorded instead of resolved silently.
+
+That is a second independent case of `ε` failing as a proxy for accuracy: 3.07 % on a fit
+accurate to 1.8 % in speed. The first was 2.97 % on one accurate to 0.3 %.
+
+### `MIN_AIRCRAFT_SPEED` is too high, and now there is truth behind that
+
+DESIGN.md 3.1a justifies the 35.8 m/s (80 mph) floor as "road and rail run below ~35 m/s;
+aircraft above ~40 m/s". The aircraft half of that is **false at this site**. `a6b080` was
+doing **32.7 m/s by ADS-B**, and the operator heard it plainly. A second candidate at the same
+arrival was rejected with `too slow for an aircraft (23 m/s)`.
+
+Light aircraft in the circuit fly at 60–70 kt (31–36 m/s), so a station near an airfield sees
+them routinely — and they are exactly the traffic the blind path exists for, since ADS-B Out
+is not required in Class G below 10,000 ft. The floor and real road traffic now genuinely
+overlap, so **no threshold separates them**, which is the same shape of problem as the epsilon
+gate and the misfitting car.
+
+The gate has not been changed. Lowering it trades directly against the one thing this project
+has protected most carefully — zero false positives in 274 label-verified windows — and the
+ground-source corpus that would measure that trade does not exist. What the join-first order
+already buys is that a slow aircraft **with** an ADS-B track is now kept regardless of the
+floor, which is precisely what happened here. The floor still governs the blind product, where
+nothing else can vouch for the detection.
+
+### "Nothing tonal" was a statement about 50 seconds, not about the pass
+
+The operator reported a plainly audible propeller aircraft. The dashboard recorded that pass
+as **`nothing tonal`, score 8.7**.
+
+`adsb.pass_geometry` already computes how long each pass is audible, as `3 · d/v`. For this
+aircraft — 3.8 km out at 45.7 m/s — that is **±248 s**. `best_score_near` ignored it and used
+a hard-coded **±25 s**, so it read the quiet fifty seconds either side of CPA. The comb that
+actually belonged to that aircraft scored **37.8**, 128 s away, inside the window the same
+object was already carrying.
+
+Every slow or distant pass was being scored over a window far narrower than its own
+audibility, which systematically inflated the `unheard` list and made the detection rate read
+low.
+
+The fix is **not** simply to use `audible_window`. That is `3 · d/v`, which at this station's
+real geometries runs **440–660 s** — wider than the 420 s analysis window, so the best score
+inside it would be the loudest thing in the entire analysis and would say nothing about the
+aircraft in question. Replacing a window that is too narrow with one that is too wide just
+inverts the error.
+
+The attributable scale is the Doppler transition itself, about `d/v`: a tone belonging to a
+pass has its own CPA within roughly that of the aircraft's. Each pass is now scored over
+`±max(d/v, 25 s)`, the floor keeping a fast close pass from getting a uselessly short span.
+For the aircraft above that is ±83 s rather than ±25.
+
+What that column means is worth stating precisely, because it is easy to over-read: it answers
+*was anything tonal while this aircraft was overhead*, not *was this aircraft heard*. Only the
+join answers the second, because only the join checks that the tone's geometry matches the
+track's.
+
+### The speed floor was measured, and the first value tried was wrong
+
+`MIN_AIRCRAFT_SPEED` was 35.8 m/s (80 mph), justified in DESIGN.md as "road and rail run below
+~35 m/s; aircraft above ~40 m/s". The station's first ADS-B-confirmed pass was doing **32.7
+m/s**, so the aircraft half of that is false at a site near an airfield.
+
+**25.0 m/s was tried first and the synthetic suite rejected it in seconds**: a truck at 28 m/s
+and 200 m came back as `aircraft: 26 m/s at 165 m`. Measuring what each source actually fits
+at is what produced a defensible value:
+
+| synthetic source | fits at | rejected by |
+|---|---|---|
+| car 25 @ 60 m | 60.8 m/s | transition unresolvable (1.5 s) |
+| car 30 @ 120 m | 48.1 m/s | `ε` 3.91 % |
+| **truck 28 @ 200 m** | **26.1 m/s** | **the speed floor, and nothing else** |
+| loco 20 @ 50 m | 101.5 m/s | pinned at the distance floor |
+| loco 20 @ 300 m | 20.0 m/s | pinned at the lower speed bound |
+| *station's confirmed pass* | *32.1 m/s* | *(accepted; ADS-B 32.7)* |
+
+Four of the five ground sources are rejected whatever this gate says — two of them by the
+bound check added in the same pass. **Exactly one case depends on it**, which puts the usable
+range at `(26.1, 32.1)`.
+
+**30.0 m/s (58 kt)** sits in that gap, biased towards the ground-source end: 15 % margin above
+the truck against 6.5 % below the aeroplane, because a false "non-cooperative aircraft" is the
+error this instrument cannot afford. The 6.5 % is still ~3.6σ on the 1.8 % speed error
+measured against ADS-B.
+
+No value separates these populations cleanly — highway traffic runs 29–36 m/s and light
+aircraft approach at 28–33 — so this is a floor for the blind path alone. Where ADS-B exists,
+the join runs first and confirms a slow aircraft on its whole trajectory rather than one
+number, which is how the 32.7 m/s pass was kept.
+
+The suite caught the first attempt because AeroSonicDB has no labelled ground vehicles. That
+is the second time the two corpora have covered for each other on this exact gate.
+
+On the corpus the change is invisible, which is the point:
+
+| | propeller | turbofan fired on | FP, 51 s verified | FP, 10 s curated |
+|---|---|---|---|---|
+| floor 35.8 m/s | 103 / 151 (68.2 %) | 2 / 474 | 0 / 274 | 0 / 1,236 |
+| **floor 30.0 m/s** | **103 / 151 (68.2 %)** | **2 / 474** | **0 / 274** | **0 / 1,236** |
+
+Not one clip of 2,135 changes verdict. AeroSonicDB is airport traffic, so nothing in it sits
+in the 30–36 m/s band at all — the gate was costing nothing *here* while rejecting a confirmed
+aircraft *there*. A corpus can only tell you about the traffic it contains.
+
+**And lowering it exposed a bug in a different stage.** With the floor at 30.0 the CLI scene
+test began reporting two aircraft where there is one. The extra detection was not the vehicle
+— that is correctly rejected at 27.9 m/s — but a **second lock on the real aircraft's receding
+tail**, fitted at 34 m/s and 690 m against a truth of 90 m/s and 2 km, with `ε` of 0.14 %.
+
+It escaped de-duplication by 0.7 s. The merge window was `0.6 · d/v`, and a flyby's Doppler
+transition spans about `d/v` either side of CPA, so a duplicate can land anywhere in that
+range; the window is now the full `d/v`.
+
+For as long as `MIN_AIRCRAFT_SPEED` was 35.8 this duplicate was silently discarded as "too
+slow", so **a threshold in one stage was hiding a defect in another**, and the apparent cost
+of lowering it was partly the cost of removing that cover. It is also a fourth case of `ε`
+being no guide to accuracy: 0.14 % on a fit wrong by a factor of two in speed and three in
+range.
+
+### Rejection reasons that were statements about the optimiser, not the aircraft
+
+Several candidates came back sitting exactly on a solver bound — speed at 20.0, distance at
+50 m or 20,000 m — and were rejected with `too slow for an aircraft (20 m/s)` and
+`transition unresolvable`. Both read as measurements of the source. Neither was one. The
+bound check now runs before every gate that phrases itself that way, and names which bound,
+because a wrong reason is worse than no reason: it sends the next person to recalibrate a
+threshold that was never involved. This review began by taking four such reasons at face
+value.
+
+**Jets were excluded from the wrong half of the join.** `audible_candidates(exclude_jets=True)`
+removed them from the candidate list, so a turbofan the detector *did* fire on — 2 of 474 here
+— had no track to match and became an unexplained detection. This page claimed above that such
+clips "join to their own ADS-B track"; in the deployed code they could not. Engine type now
+decides only whether a miss counts, never whether a match may be made.

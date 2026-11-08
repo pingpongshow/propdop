@@ -174,9 +174,19 @@ on synthetic cars, trucks, locomotives and aircraft from 20 to 130 m/s:
 
 | Check | Threshold | Why |
 |---|---|---|
-| **Fit quality** | comb score ≥ 5.0, `ε` ≤ 0.5% | A ground source forced into a flyby model fits badly: aircraft scored comb 5.4-6.7 and `ε` ≤ 0.3%, mis-fits scored 1.4-2.2 and 1.9-3.9% |
+| **Fit quality** | `ε` ≤ 3.0% | A ground source forced into a flyby model fits badly. 0.02 came from synthetic fits; the real-audio median is 1.22%, and a misfitting car sits at 3.91% (VALIDATION.md). Comb contrast is reported but **not** gated: it is per-frame and less sensitive than the matched filter that found the event |
 | **Resolvability** | `d/v` ≥ 5 s | The sweep takes about `d/v`. A locomotive at 50 m doing 20 m/s completes it in 2.5 s — two or three STFT frames — and came back fitted at **101 m/s** |
-| **Speed** | ≥ 35.8 m/s (80 mph) | Road and rail run below ~35 m/s; aircraft above ~40 m/s |
+| **Speed** | ≥ 30.0 m/s (58 kt) | Was 35.8 (80 mph), which rejected the station's first ADS-B-confirmed pass at 32.7 m/s. Only one synthetic ground source depends on this gate — a truck fitting at 26.1 m/s — so the usable range is `(26.1, 32.1)` and 30.0 is biased to the ground-source end. The populations genuinely overlap (highway 29–36 m/s, light aircraft approach 28–33), so this is a blind-path floor; the join rescues a slow aircraft ADS-B can vouch for |
+| **Range** | `d` ≤ 8 km | `physics.AUDIBILITY_RADIUS_M`, shared with `adsb.audible_candidates`. Believing a detection at a range you refuse to expect one at is incoherent |
+| **Not on a bound** | v ∉ {20, 250}, `d` ∉ {50 m, 20 km} | Checked **first**, because every other row phrases its rejection as a fact about the aircraft. A fit resting on a solver bound is where the search stopped, and calling that "too slow for an aircraft (20 m/s)" fabricates a measurement |
+
+**Where this runs matters as much as what it checks.** It gates `unexplained` only, *after*
+the ADS-B join, not before it. Running it first threw away detections that ADS-B could have
+identified: the station rejected a Cirrus SR22T as `poor fit (epsilon 3.13%)` that matches its
+own track at **chi 0.11** against a threshold of 3.0. `ε` measures how well the model fits what
+it was shown; chi against a known trajectory measures whether the geometry is right. Where both
+exist, chi wins, and a match that fails screening is kept with the disagreement recorded —
+those rows are the only honest basis for recalibrating these thresholds.
 
 The speed gate only works because the fit's lower speed bound reaches 20 m/s, letting a slow
 source be described correctly and then rejected on its true speed. A template bank starting at

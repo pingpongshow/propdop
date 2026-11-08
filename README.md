@@ -59,10 +59,34 @@ Four things that validation changed, which no synthetic test could have told us:
   from measurement, which is what moved detection from 61.6 % to 68.2 %.
 - **Ground-source rejection is still untested on real audio** — nothing false-positived, so
   nothing exercised it.
+- **The 80 mph aircraft floor was too high for circuit traffic**, and is now 58 kt. The first
+  ADS-B-confirmed pass was doing 32.7 m/s, under the old 35.8 m/s gate; it survived only
+  because the join runs before the screen. Lowering it is bounded on both sides by
+  measurement — a truck that fits at 26.1 m/s below, that aeroplane at 32.1 above — and the
+  first value tried, 25 m/s, was rejected by the synthetic suite within seconds.
+- **`ε` is not accuracy.** A pass that reproduces its ADS-B geometry to 0.3 % carries
+  ε = 2.97 %, against a gate that rejects at 3.0 %; shortening the fit window drives ε *down*
+  while the geometry gets *worse*. ε says how well the model fits what it was shown, not
+  whether the answer is right, so the ADS-B join now runs **before** screening rather than
+  after it.
 
-Still true: the live station has **not yet confirmed a detection of its own**, the atmospheric
-inversion has never run on real passes, and indoors is for proving the pipeline rather than
-producing soundings, since mains hum at 60 Hz sits directly in the propeller band.
+**The corpus numbers above did not describe the deployed station**, and finding out why is
+the most useful thing this project has done. `fit_comb`'s answer depended on `t_offset` — a
+label for the time axis that should shift one output and change nothing else. The harness
+passes none; a live node passes an absolute unix time, where `least_squares` stopped after one
+step and still reported success. The station's first thirteen detections were therefore all
+unmatched, at a detection rate of 0.0 %, while one of them reproduces its own ADS-B track to
+**0.3 % in speed and 2.4 % in range** once the time base is local. No corpus of clips can
+produce an absolute timestamp, so no corpus run could have caught it.
+
+**The station has now confirmed its first pass against ADS-B**: a low, slow aircraft at 953 m
+fitted to **−1.8 % in speed and −10.5 % in range**, chi 0.45 against a threshold of 3.0. It is
+one pass, so it is an existence proof and not an error model; the detection rate stands at
+9.1 % on a propeller denominator of 11.
+
+Still true: the atmospheric inversion has never run on real passes, and indoors is for proving
+the pipeline rather than producing soundings, since mains hum at 60 Hz sits directly in the
+propeller band.
 
 Several figures here were **wrong and were corrected** after being measured properly. The
 corrections are recorded in the documents rather than quietly edited away.

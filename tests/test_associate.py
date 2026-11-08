@@ -133,6 +133,56 @@ def build_world(clock_offset_s: float = 0.0):
     return samples, tracks
 
 
+def test_a_screened_out_detection_can_still_be_matched():
+    """ADS-B is better evidence about identity than a self-assessed fit residual.
+
+    The deployed station rejected a Cirrus SR22T as "poor fit (epsilon 3.13%)" and filed it as
+    a miss. Refitted, it reproduces that aircraft's own track at chi 0.11 against a threshold
+    of 3.0. Screening before the join discards exactly this case, and it discards it silently:
+    the detection becomes a miss and the aircraft becomes unheard, so one event damages both
+    products at once.
+    """
+    track = adsb.synthetic_track(
+        RX, 66.3, 1835, 1700, t_cpa=200.0, icao24="scr001", type_code="S22T"
+    )
+    geoms = adsb.audible_candidates([track], RX)
+    assert len(geoms) == 1
+    g = geoms[0]
+
+    marginal = detect.Detection(
+        t0_heard=g.t_heard_cpa + 0.1,
+        f0=82.6,
+        speed=66.5,
+        cpa_distance=1791.0,
+        template_score=46.3,
+        is_aircraft=False,
+        reason="poor fit (epsilon 3.13%, contrast -0.08)",
+    )
+
+    screened_first = associate.join([marginal], geoms, aircraft_only=True)
+    assert screened_first.matches == []
+    assert screened_first.unheard == geoms        # and the aircraft is recorded as a miss
+
+    joined_first = associate.join([marginal], geoms, aircraft_only=False)
+    assert len(joined_first.matches) == 1
+    assert joined_first.matches[0].geometry.icao24 == "scr001"
+    assert joined_first.matches[0].chi < associate.MAX_CHI
+    assert joined_first.unheard == []
+
+
+def test_screening_still_gates_the_blind_product():
+    """`unexplained` is the one place the screen is load-bearing: nothing else vouches for it."""
+    ground = detect.Detection(
+        t0_heard=500.0, f0=120.0, speed=48.0, cpa_distance=359.0,
+        template_score=22.0, is_aircraft=False, reason="poor fit (epsilon 3.91%)",
+    )
+    result = associate.join([ground], [], aircraft_only=False)
+    assert result.matches == []
+    assert result.unexplained == [ground]
+    # the worker applies the screen to exactly this list, and only to this list
+    assert [d for d in result.unexplained if d.is_aircraft] == []
+
+
 @pytest.fixture(scope="module")
 def joined():
     samples, tracks = build_world()
