@@ -1,0 +1,85 @@
+# PropDop on server. All persistent state under ./data, matching the convention
+# the other applications on this host use.
+#
+#   ./data/db        pass database (SQLite; ~0.3 GB/year at 15 kB/pass)
+#   ./data/corpus    retest corpus, capped at 1 GB (BUILD.md 2)
+#   ./data/archive   rolling decimated archive, self-expiring (~2 GB)
+#   ./data/config    station config, including the required geoid offset
+#   ./data/adsb      readsb state
+#
+# There is no GPU service: the workload is CPU-bound and the 5090 earns nothing here.
+# There is no adsb.lol archive fetcher: a local receiver makes it unnecessary.
+
+networks:
+  default:
+    name: propdop
+
+services:
+  # The instrument: capture, blind detection, comb fit, ADS-B join, storage.
+  propdop:
+    build: .
+    image: propdop:latest
+    container_name: propdop
+    volumes:
+      - ./data:/data
+    devices:
+      - /dev/snd:/dev/snd        # USB microphone; host has no ALSA tooling, the image does
+    group_add:
+      - "17"              # host 'audio' gid; by number, since the container's group table differs
+    environment:
+      - PROPDOP_DATA=/data
+      - TZ=America/Los_Angeles
+    restart: unless-stopped
+    command: ["run"]
+    # The image's default healthcheck probes HTTP, which only the web service serves. Capture
+    # liveness is instead "the heartbeat file is advancing" -- a wedged capture thread is
+    # otherwise invisible until the dashboard has been empty for days.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time,sys; s=json.load(open('/data/db/pipeline_status.json')); sys.exit(0 if time.time()-s['status_written']<180 else 1)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+  # The UI, reading the same database. Separate container so a restart of either does not
+  # interrupt the other; SQLite is in WAL mode so concurrent read/write is safe.
+  propdop-web:
+    image: propdop:latest
+    container_name: propdop-web
+    depends_on:
+      - propdop
+    volumes:
+      - ./data:/data
+    environment:
+      - PROPDOP_DATA=/data
+      - TZ=America/Los_Angeles
+    ports:
+      - "8475:8475"          # verified free on the host
+    restart: unless-stopped
+    command: ["serve"]
+
+  # Local ADS-B receiver. NOT required: with no dongle attached, PropDop uses the free
+  # adsb.lol live API instead (adsb.fetch_adsb_lol), which rounds the query centre to ~11 km
+  # so the exact site is never sent to a third party. Enable this once a dongle is fitted --
+  # a local antenna hears low traffic that volunteer feeder coverage misses.
+  # Confirm the image tag before first deploy; the RTL-SDR needs the host's DVB driver
+  # blacklisted.
+  propdop-adsb:
+    profiles: ["receiver"]
+    image: ghcr.io/sdr-enthusiasts/docker-readsb-protobuf:latest
+    container_name: propdop-adsb
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    volumes:
+      - ./data/adsb:/var/globe_history
+    environment:
+      # Must match the station config's surveyed position.
+      # Only needed when the receiver profile is enabled; set them in .env then.
+      - READSB_LAT=${PROPDOP_LAT:-}
+      - READSB_LON=${PROPDOP_LON:-}
+      - READSB_RX_LOCATION_ACCURACY=2
+      - READSB_STATS_RANGE=true
+      - READSB_NET_ENABLE=true
+    ports:
+      - "8476:8080"          # readsb/tar1090 map
+    restart: unless-stopped

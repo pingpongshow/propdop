@@ -1,0 +1,11 @@
+{
+  "station_id": "alpha",
+  "lat": 40.8764,
+  "lon": -73.5258,
+  "elevation_msl_m": 20.0,
+  "geoid_offset_m": -33.0,
+  "microphone": "Primo EM272 + USB interface",
+  "windscreen": "90 mm foam, ground-plane mount",
+  "spl_calibrated": false,
+  "ground_sources": "road 180 m NW; rail 1.4 km S"
+}

@@ -1,0 +1,27 @@
+[project]
+name = "propdop"
+version = "0.1.0"
+description = "Passive acoustic aircraft and atmosphere observatory"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.12",
+    "soundfile>=0.12",
+]
+
+[project.scripts]
+propdop = "propdop.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "httpx>=0.27"]
+web = ["fastapi>=0.110", "uvicorn>=0.27"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
