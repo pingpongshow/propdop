@@ -190,6 +190,13 @@ test sets are complementary, and neither alone is sufficient.
 Within hours of running with the recalibrated constants, the deployed station produced its
 first two blind detections. One of them was this:
 
+> **A note on times.** Every station timestamp quoted in this section and the next is **UTC**,
+> which is what a Raspberry Pi renders out of the box and what the database returned at the
+> time. That host has since been set to its operator's own zone, so re-running these queries
+> today returns local time instead. The stored values are unix epoch and unchanged; only the
+> rendering moved. The dashboard now labels the zone for exactly this reason.
+
+
     04:06:02   f0 89.09 Hz   211.8 m/s   slant 16,423 m   unmatched to ADS-B
 
 It would have been published as a **non-cooperative aircraft** — the headline product. It is
@@ -252,7 +259,7 @@ rejections — was noise.
 
 ### What it cost, measured against truth
 
-The Cirrus SR22T at 05:15, stored as *"poor fit (epsilon 3.13 %)"*:
+The Cirrus SR22T at 05:15 UTC, stored as *"poor fit (epsilon 3.13 %)"*:
 
 | | speed err | slant err | Δt | chi |
 |---|---|---|---|---|
