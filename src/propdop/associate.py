@@ -29,6 +29,19 @@ SIGMA_SLANT_FRAC = 0.25
 MAX_CHI = 3.0
 AMBIGUITY_RATIO = 1.5
 
+# A clock offset is one parameter shared by every pass, so k residuals leave k-1 degrees of
+# freedom to check it against. At k=1 the estimate is exactly degenerate: the scan slides the
+# offset until that one detection's dt is zero, which deletes the time term from chi and lets
+# geometry alone decide the association. The deployed station did this -- one detection
+# matched an aircraft 96 s away at chi 1.16, with the estimator reporting -96.4 s. Two
+# residuals that agree are the minimum that measures anything, and the search stays wide
+# because a host with no RTC and no network time really can be minutes out.
+MIN_OFFSET_RESIDUALS = 2
+# How far two passes' residuals may sit apart and still be read as one shared offset. A clock
+# error is common to every pass by definition, so residuals that disagree by more than a few
+# sigma are not measuring a clock.
+OFFSET_AGREEMENT_SIGMA = 4.0
+
 
 @dataclass
 class Match:
@@ -111,8 +124,13 @@ def estimate_clock_offset(
     The array self-calibrates: ADS-B gives the true heard-CPA time, so the systematic part of
     the residual *is* the clock offset. Uses the median of the best per-detection residual over
     a coarse scan, which tolerates detections that match nothing.
+
+    Returns 0.0 unless at least `MIN_OFFSET_RESIDUALS` *accepted* matches agree to within
+    `OFFSET_AGREEMENT_SIGMA` sigma. One detection cannot measure a parameter shared by every
+    pass -- it can only be slid onto whatever geometry is nearest, which silently deletes the
+    time term from `_chi`. An offset no second pass corroborates is not a clock error.
     """
-    if not detections or not geometries:
+    if len(detections) < MIN_OFFSET_RESIDUALS or not geometries:
         return 0.0
     best_offset, best_score = 0.0, np.inf
     for trial in np.arange(-search_s, search_s + 1.0, 1.0):
@@ -121,20 +139,27 @@ def estimate_clock_offset(
             c = [_chi(det, g, trial) for g in geometries]
             if c and min(c) < MAX_CHI * 2.0:
                 resid.append(min(c))
-        if len(resid) >= max(1, len(detections) // 3):
+        if len(resid) >= MIN_OFFSET_RESIDUALS:
             score = float(np.median(resid))
             if score < best_score:
                 best_offset, best_score = float(trial), score
     if not np.isfinite(best_score):
         return 0.0
-    # refine on the residuals of the accepted matches
+    # refine on the residuals of the accepted matches, and only while enough of them agree to
+    # keep the single shared parameter identifiable
     fine = []
     for det in detections:
         pairs = [(_chi(det, g, best_offset), g) for g in geometries]
         chi, g = min(pairs, key=lambda p: p[0])
         if chi < MAX_CHI:
             fine.append(det.t0_heard - g.t_heard_cpa)
-    return float(np.median(fine)) if fine else best_offset
+    if len(fine) < MIN_OFFSET_RESIDUALS:
+        return 0.0
+    med = float(np.median(fine))
+    agreeing = [x for x in fine if abs(x - med) <= OFFSET_AGREEMENT_SIGMA * SIGMA_T_S]
+    if len(agreeing) < MIN_OFFSET_RESIDUALS:
+        return 0.0
+    return float(np.median(agreeing))
 
 
 def join(
