@@ -427,3 +427,28 @@ def test_both_halves_of_the_join_use_one_audibility_radius():
     r = _good_fit()
     assert fit.plausible_aircraft(dataclasses.replace(r, cpa_distance=radius * 0.5))[0]
     assert not fit.plausible_aircraft(dataclasses.replace(r, cpa_distance=radius * 2.0))[0]
+
+
+def test_a_failed_rewindow_does_not_crash_the_fit(monkeypatch):
+    """A spectrogram, its ridge and its `keep` mask are one indivisible set.
+
+    `fit_comb` re-traces at the window matched to the fitted slope, which yields a ridge with
+    a different number of frames. Adopting that trace while keeping the first fit's mask left
+    `keep` indexing an array it was never built for; the exception surfaced on the deployed
+    station as `refinement failed: IndexError` and cost it a C172 that had scored 32.1 against
+    an 18.0 threshold.
+    """
+    real = fit.fit_straight_pass
+    calls = []
+
+    def once_then_fail(*a, **kw):
+        params, ok = real(*a, **kw)
+        calls.append(ok)
+        return params, (ok if len(calls) == 1 else False)
+
+    monkeypatch.setattr(fit, "fit_straight_pass", once_then_fail)
+    # a close pass: its slope puts the matched window at ~0.53 s, far enough from the 1 s
+    # first pass that the re-trace runs and the two ridges differ in length
+    r, truth = run(cpa_distance=600, snr_db=20)
+    assert len(calls) >= 2, "the matched-window re-trace never ran, so nothing was tested"
+    assert np.isfinite(r.epsilon_ridge) and np.isfinite(r.f0)

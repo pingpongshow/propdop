@@ -653,10 +653,18 @@ def fit_comb(
         slope = abs(physics.cpa_slope_hz_per_s(f0, speed, cpa, c))
         matched = float(np.clip(1.0 / np.sqrt(max(slope, 1e-3)), 0.25, 4.0))
         if abs(matched - win) > 0.2 * win:
-            win = matched
-            (freqs, times, wmag), (rt, rf, rs) = trace_fundamental(win)
-            p2, ok2, keep2 = fit_strong(rt, rf, rs)
+            # A trace at a different window length yields a ridge with a different number of
+            # frames, so a spectrogram, its ridge, its `keep` mask and the parameters that
+            # mask produced are one indivisible set. Adopting the new trace while keeping the
+            # old mask leaves `keep` indexing an array it was never built for, which raises
+            # IndexError a few lines below -- swallowed by the refinement path as
+            # "refinement failed: IndexError", and that is how the station lost a C172 that
+            # had scored 32.1 against an 18.0 threshold. Swap the whole set or none of it.
+            retrace = trace_fundamental(matched)
+            p2, ok2, keep2 = fit_strong(*retrace[1])
             if ok2:
+                win = matched
+                (freqs, times, wmag), (rt, rf, rs) = retrace
                 params, ok, keep = p2, ok2, keep2
                 f0, speed, cpa, t0 = params
 
