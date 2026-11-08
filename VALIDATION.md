@@ -475,3 +475,165 @@ removed them from the candidate list, so a turbofan the detector *did* fire on �
 — had no track to match and became an unexplained detection. This page claimed above that such
 clips "join to their own ADS-B track"; in the deployed code they could not. Engine type now
 decides only whether a miss counts, never whether a match may be made.
+## What the fourth review found
+
+The fourth review (2026-11-08, 10:29 PST) went looking for passes. It found five defects, four
+of them landing on the one number that is supposed to summarise the instrument — the detection
+rate — and pushing it in both directions at once. It read 17.4 %. Neither the direction nor the
+size of the error was guessable from the figure.
+
+Three of the five were found by reading the station's own stored columns rather than its code:
+`clock_offset_s`, `comb_contrast`, and two rows whose `reject_reason` was a Python exception.
+
+### A closest approach the aircraft had not reached yet
+
+`pass_geometry` finds the slant minimum over the observed track. When the aircraft is still
+inbound at the end of that track, the minimum lands on the final sample, and what comes back
+is not a closest approach: it is *the closest it got before the snapshots ran out*. The error
+has a fixed sign — too far, and too early — because the aircraft was still closing.
+
+The station did this to a Beech Bonanza. One window predicted a CPA of 3,017 m, heard nothing
+there, and filed it as unheard. The next window saw the completed pass at **828 m**,
+detected it, and matched it at χ 0.43. One aeroplane, 36 s apart on the ADS-B clock, entered
+both halves of its own detection rate — as the miss and as the hit.
+
+`PassGeometry.cpa_bracketed` now records whether the track actually straddles the CPA, and
+`audible_candidates` drops the ones that do not. It is withheld from *both* directions of the
+join deliberately: a match made against an extrapolated geometry is a match to the wrong
+numbers, and a miss recorded against it is a miss on a pass that has not happened. Consecutive
+analysis windows overlap by `analysis_window_s - analysis_period_s`, which is 120 s as
+deployed, so nothing is lost by waiting for the window that sees the whole pass. That overlap
+is what it is for.
+
+### One pass, counted twice
+
+The positives were de-duplicated by `_already_stored` from the beginning. The negatives never
+were, and the `UNIQUE (station_id, t_heard_cpa, icao24)` constraint does not catch them,
+because `t_heard_cpa` is recomputed from a different set of ADS-B snapshots in each window and
+moves by a fraction of a second. Eleven of forty `unheard` rows were one arrival filed twice.
+
+The de-duplication window was measured rather than chosen. Two windows reporting one arrival
+put it within 26 s, and 8 of the 11 agreed to under 1 s; the same aircraft genuinely coming
+round again — an AS350 orbiting — was 87 s away. `unheard_dedup_s` is 60 s, between the two.
+
+It also has to compare like with like. `passes.t_heard_cpa` is the *acoustic* time and carries
+the fit's own error, 96 s of it in the case below, so testing a negative against that column
+finds a phantom duplicate 96 s away and misses the real one sitting on top of it.
+`adsb_t_heard_cpa` comes from the same source as the negative being tested, and on the three
+real cases agreed to 0.6 s.
+
+### A clock offset no second pass corroborated
+
+A clock offset is one parameter shared by every pass, so *k* residuals leave *k*−1 degrees of
+freedom to check it against. `estimate_clock_offset` accepted *k* = 1, where the fit is exactly
+degenerate: the scan slides the offset until that one detection's timing error is zero. The
+time term then contributes nothing to χ and geometry alone decides the association.
+
+The station matched one detection to an aircraft **96.4 s** away at χ 1.16, with the estimator
+reporting −96.4 s. That is not a near miss on a threshold; it is the threshold being removed.
+And the stored rows show it was removed every time:
+
+| pass | timing residual | reported offset |
+|---|---|---|
+| Bonanza (matched, χ 0.43) | +6.1 s | +6.1 s |
+| Mooney | −11.7 s | −11.7 s |
+| the 10:00 pass | −96.4 s | −96.4 s |
+| the 08:02 pass | −5.7 s | −5.7 s |
+
+In all four, the offset is *exactly* the single detection's own residual, so the time term of
+χ was zero by construction on every association the station has ever made. Recomputing χ at
+zero offset withdraws two of them: the 10:00 pass at χ 32.1, and the Mooney — fitted speed 27 % high,
+distance 21 % high — at χ 4.84. The two good ones survive
+comfortably, at χ 1.95 and 2.08.
+
+So two of the station's four matches were produced by the estimator rather than by the
+instrument — the opposite bias to the two above. An offset now needs at least
+`MIN_OFFSET_RESIDUALS` accepted matches whose residuals agree to within
+`OFFSET_AGREEMENT_SIGMA · SIGMA_T_S`, and reports zero otherwise. The ±120 s search is
+unchanged: a host with no RTC and no network time really can be minutes out, and the problem
+was never the width of the search but the absence of a second opinion.
+
+### A re-trace that crashed, and was reported as a rejection
+
+Two rows read `refinement failed: IndexError` — the catch-all in `detect.detect`, which turns
+any exception during refinement into a rejection. One was a Cessna 172 that had scored **32.1**
+against an 18.0 threshold.
+
+`fit_comb` traces the ridge at a 1 s window, fits, then re-traces at the window matched to the
+fitted slope. A trace at a different window length yields a ridge with a different number of
+frames, so a spectrogram, its ridge, its `keep` mask and the parameters that mask produced are
+one indivisible set. The code adopted the new trace and kept the old mask whenever the second
+fit failed to converge, leaving `keep` indexing an array it was never built for:
+`boolean index did not match indexed array along axis 0; size of axis is 902 but size of
+corresponding boolean axis is 477`. Reproduced exactly in
+`test_a_failed_rewindow_does_not_crash_the_fit`.
+
+This is the second time a rejection reason has been a statement about the software rather than
+the aircraft, and the first where it was a crash. A bare `except Exception` that writes its
+verdict into a results table will keep doing this, so the reason string now has to be read as
+a hypothesis, never a finding.
+
+### What the rate actually is
+
+Removing only what is verifiable from the stored columns — three rows recording aircraft the
+station demonstrably heard, and seven arrivals filed twice — takes the propeller-only rate from
+17.4 % to 23.5 % on 4 matches against 13 misses. Withdrawing the two uncorroborated
+associations takes it back down. At single-digit match counts the ratio is dominated by its own
+small numbers, and the useful conclusion is not a percentage but that **four independent
+defects all landed on the one figure that is supposed to summarise the instrument, with
+opposite signs, and none was visible in it.**
+
+### The truth side of the join was the noisier side
+
+Two lines in the station's `run.log`, repeating:
+
+```
+UserWarning: The maximal number of iterations maxit (set to 20 by the program)
+allowed for finding a smoothing spline with fp=s has been reached: s too small.
+```
+
+`_smooth_enu` fits a cubic smoothing spline to each ADS-B track, and FITPACK's `s` is the
+*total* allowed misfit — per point, the variance of the position error. It was a hard-coded
+4 m², a 2 m RMS. ADS-B does not deliver 2 m. FITPACK cannot reach a misfit that small, gives
+up after 20 iterations, and returns a spline that threads the noise — which is the one failure
+the function's own docstring says it exists to prevent.
+
+Differentiating that spline is where `speed_mps` comes from. Measured against known truth at
+10 m of position jitter, the error was **9.5 %** on speed; at 25 m, **19.7 %**. The join
+compares that number against the acoustic fit with `SIGMA_SPEED_FRAC` = 10 %. So the *truth*
+was no better than the tolerance it was the truth for, and `error_model`, whose entire purpose
+is to correct the fit's known overconfidence, has been measuring the spline.
+
+No constant fixes this, because the noise is not a constant — it depends on the aircraft's
+equipment and on its range. Smoothing less than the noise tracks the noise; smoothing more
+cuts the corner on a turn. The noise is now estimated from the track itself, as the median
+absolute deviation of its second differences (a smooth trajectory has none, so what is left is
+noise with variance 6σ²; MAD rather than RMS so a dropped report cannot set the smoothing for
+the whole track). It recovers the jitter it was given to within 2 %, and median speed error
+falls to **0.04 %** at 10 m and **0.11 %** at 25 m.
+
+`test_pass_geometry_survives_position_jitter` did not catch any of this, because it was written
+to the tolerance the implementation happened to achieve: it allows 15 % on a quantity the join
+needs to 10 %. A test written that way around records a defect instead of catching it.
+
+### Half the stored passes have no comb in them
+
+Asked why the station's spectrograms did not look like a textbook flyover, the answer turned
+out to be in a column already being written. Sorting the 39 stored passes by `comb_contrast`:
+
+| `comb_contrast` | rows | what is there |
+|---|---|---|
+| 2.36 | 1 | the ADS-B-confirmed Bonanza |
+| 0.47 – 1.84 | 7 | real combs; all four matches are in this group |
+| −0.04 – 0.15 | 20 | the comb is no stronger than the background |
+
+Rendering them settles it. The Bonanza is a textbook harmonic comb with the Doppler S-curve
+running through every harmonic. A blind detection from 10:42 that scored **32.8** against an
+18.0 threshold has nothing in it at all: the fit is a clean S-curve through noise.
+
+`detect` accepts `min_comb_contrast` and deliberately does not apply it. That decision now has
+evidence against it, and `template_score` alone is demonstrably not sufficient — the noise fit
+outscored three of the four real matches. Left as measured rather than acted on, because
+changing a detection threshold on 39 rows would be fitting a threshold to an anecdote; what
+the station needs first is enough matched passes to put a number on where the two populations
+separate.

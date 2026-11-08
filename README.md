@@ -79,10 +79,24 @@ unmatched, at a detection rate of 0.0 %, while one of them reproduces its own AD
 **0.3 % in speed and 2.4 % in range** once the time base is local. No corpus of clips can
 produce an absolute timestamp, so no corpus run could have caught it.
 
-**The station has now confirmed its first pass against ADS-B**: a low, slow aircraft at 953 m
-fitted to **−1.8 % in speed and −10.5 % in range**, chi 0.45 against a threshold of 3.0. It is
-one pass, so it is an existence proof and not an error model; the detection rate stands at
-9.1 % on a propeller denominator of 11.
+**The station has now confirmed passes against ADS-B.** The best of them, a Bonanza at 828 m,
+fitted to **−2.4 % in speed and −8.9 % in range** with a textbook harmonic comb; a slower
+aircraft at 953 m came in at −1.8 % and −10.5 %. These are existence proofs, not an error
+model — there are not yet enough of them to be one.
+
+**The detection rate it reports should not be believed yet.** The fourth review found five
+defects, four of them landing on that single number and pushing it in opposite directions: a
+closest approach computed from a track that had not reached it, one pass counted in both the
+hit and the miss column, a clock-offset estimator that made the timing term of chi vacuous on
+every association the station had ever made, and a crash inside the comb fit reported as an
+ordinary rejection. A fifth put a 10–25 % error on the ADS-B *truth* the acoustic fit is
+measured against. All five are fixed and written up in [VALIDATION.md](VALIDATION.md); what is
+missing is enough matched passes to say what the corrected rate actually is.
+
+Also measured and not yet acted on: `comb_contrast` is at or below 0.15 on twenty of the
+station's thirty-nine stored passes, meaning the harmonic comb there is no stronger than the
+background. `template_score` alone does not separate the two populations — a fit to noise
+outscored three of the four real matches.
 
 Still true: the atmospheric inversion has never run on real passes, and indoors is for proving
 the pipeline rather than producing soundings, since mains hum at 60 Hz sits directly in the
