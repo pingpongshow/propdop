@@ -240,10 +240,44 @@ def test_schema_migrates_a_database_from_an_older_build(tmp_path):
 
     db = store.Store(path)
     for table, col in (("unheard", "adsb_bearing_deg"), ("passes", "adsb_bearing_deg"),
-                       ("passes", "adsb_elevation_deg")):
+                       ("passes", "adsb_elevation_deg"),
+                       ("unheard", "best_template_score")):
         cols = {r[1] for r in db.conn.execute(f"PRAGMA table_info({table})")}
         assert col in cols, f"{table}.{col} was not migrated"
     # and the queries that need the new columns now work
     assert len(db.detection_envelope(8)) == 8
     assert db.recent_positions() == []
+    assert db.recent_unheard() == []
     db.close()
+
+
+def test_an_unheard_pass_stores_the_score_it_reached(world):
+    """A stored negative without a score is a complaint; with one it is a measurement."""
+    st = store.Store(":memory:")
+    st.add_station(store.Station.from_receiver(RX))
+    g = world.unheard[0]
+    st.record_join("alpha", world, blade_counts={"C172": 2},
+                   unheard_scores={(g.icao24, round(g.t_heard_cpa, 1)): 6.25})
+    rows = st.recent_unheard()
+    assert len(rows) == 1
+    assert rows[0]["icao24"] == g.icao24
+    assert rows[0]["best_template_score"] == pytest.approx(6.25)
+    assert detect.score_verdict(rows[0]["best_template_score"]) == "nothing tonal"
+    st.close()
+
+
+def test_a_missing_score_is_stored_as_null_not_as_zero(world):
+    """NaN round-trips through SQLite as a float, and zero would read as 'nothing tonal'."""
+    st = store.Store(":memory:")
+    st.add_station(store.Station.from_receiver(RX))
+    g = world.unheard[0]
+    st.record_join("alpha", world, unheard_scores={
+        (g.icao24, round(g.t_heard_cpa, 1)): float("nan")})
+    assert st.recent_unheard()[0]["best_template_score"] is None
+    # and a join recorded with no scores at all stays usable
+    st2 = store.Store(":memory:")
+    st2.add_station(store.Station.from_receiver(RX))
+    st2.record_join("alpha", world)
+    assert st2.recent_unheard()[0]["best_template_score"] is None
+    st.close()
+    st2.close()

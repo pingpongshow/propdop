@@ -230,3 +230,73 @@ def test_analysis_pool_uses_spawn_not_fork():
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
         p.db.close()
+
+
+def test_analysis_period_is_start_to_start_not_a_gap_afterwards(tmp_path):
+    """A slow machine must not silently lose coverage.
+
+    Waiting the full period *after* each analysis makes the real cadence `duration + period`.
+    On a fast machine that is invisible; on a Raspberry Pi 4 one window costs 136-304 s
+    against a 300 s period, so the cadence exceeds the 420 s window and stretches of audio are
+    never analysed -- leaving no row at all, not even an `unheard` one.
+    """
+    cfg = make_config(tmp_path, analysis_period_s=300.0, analysis_window_s=420.0)
+    p = pipeline.Pipeline(cfg, source=node.SyntheticSource(np.zeros(8000), nominal_rate=8000))
+    try:
+        # A cheap analysis leaves the rest of the period to wait out.
+        assert p._note_analysis_cost(17.0) == pytest.approx(283.0)
+        assert p.stats["analysis_duration_s"] == 17.0
+        assert p.stats["analysis_overruns"] == 0
+        assert p.stats["coverage_gaps"] == 0
+
+        # Longer than the period: start the next one at once rather than adding to it.
+        assert p._note_analysis_cost(350.0) == 0.0
+        assert p.stats["analysis_overruns"] == 1
+        assert p.stats["coverage_gaps"] == 0, "350 s still fits inside the 420 s window"
+
+        # Longer than the window: audio went unanalysed, which nothing else records.
+        assert p._note_analysis_cost(500.0) == 0.0
+        assert p.stats["analysis_overruns"] == 2
+        assert p.stats["coverage_gaps"] == 1
+    finally:
+        p.stop()
+
+
+def test_status_reports_the_analysis_budget(tmp_path):
+    cfg = make_config(tmp_path, analysis_period_s=120.0, analysis_window_s=300.0)
+    p = pipeline.Pipeline(cfg, source=node.SyntheticSource(np.zeros(8000), nominal_rate=8000))
+    try:
+        p._note_analysis_cost(42.0)
+        st = p.status()
+        assert st["analysis_period_s"] == 120.0
+        assert st["analysis_window_s"] == 300.0
+        assert st["analysis_duration_s"] == 42.0
+    finally:
+        p.stop()
+
+
+def test_max_detections_reaches_the_detector(tmp_path, monkeypatch):
+    """The knob that bounds a slow board's worst case is useless if it stops at the config.
+
+    Refinement costs ~2.5 s per candidate, so a saturated window is what pushes a Pi 4 past
+    its analysis period; capping the candidate count is the one config change that fixes it
+    (DESIGN.md 6.1).
+    """
+    from propdop import detect as detect_mod
+
+    seen = {}
+
+    def spy(samples, sample_rate, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(detect_mod, "detect", spy)
+    cfg = make_config(tmp_path, max_detections=6, analyse_in_process=True)
+    src = node.SyntheticSource(np.zeros(8000 * 120), nominal_rate=8000)
+    p = pipeline.Pipeline(cfg, source=src)
+    try:
+        p.node.pump(blocks=100)        # 1 s blocks, so 100 s -- over the 60 s minimum
+        p.analyse_once()
+        assert seen["max_detections"] == 6
+    finally:
+        p.stop()

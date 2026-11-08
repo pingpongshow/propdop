@@ -139,3 +139,65 @@ def test_detection_threshold_sits_between_null_and_signal():
 
     assert worst_null < detect.MIN_TEMPLATE_SCORE < best_signal
     assert best_signal > 3.0 * worst_null  # a real gap, not a hairline
+
+
+def test_score_verdict_separates_silence_from_a_near_miss():
+    mid = 0.5 * (detect.NOISE_CEILING_SCORE + detect.MIN_TEMPLATE_SCORE)
+    assert detect.score_verdict(float("nan")) == "not analysed"
+    assert detect.score_verdict(detect.NOISE_CEILING_SCORE - 1.0) == "nothing tonal"
+    assert detect.score_verdict(mid) == "below threshold"
+    assert detect.score_verdict(detect.MIN_TEMPLATE_SCORE + 1.0) == "scored, screened out"
+
+
+def test_diagnostics_are_optional_and_cost_nothing_when_unused():
+    """`detect` is called without diagnostics from the CLI, so the default path must hold."""
+    rng = np.random.default_rng(6)
+    noise = synth._pink_noise(8000 * 90, -1.5, rng)
+    assert detect.detect(noise, 8000, band=(50.0, 300.0), n_harmonics=4) == []
+
+
+def test_diagnostics_score_a_window_where_nothing_was_reported():
+    """A negative is only interpretable with the score behind it.
+
+    `min_score` governs what gets reported; without the diagnostics there is no number at all
+    for a pass ADS-B says should have been audible, and no way to tell a microphone that never
+    had the signal from a detector that nearly had it.
+    """
+    rng = np.random.default_rng(5)
+    noise = rng.standard_normal(120 * 8000) * 0.1
+    diag = {}
+    dets = detect.detect(noise, 8000, band=(50.0, 300.0), n_harmonics=4, diagnostics=diag)
+
+    assert dets == [], "pure noise must not produce detections"
+    assert diag["times"].size == diag["best_score"].size > 0
+    assert diag["times"].shape == diag["best_score"].shape
+    assert diag["min_score"] == detect.MIN_TEMPLATE_SCORE
+    assert np.isnan(detect.best_score_near({}, 0.0))   # never called without diagnostics
+    # Scored anyway, and the peak sits in the measured noise range rather than at zero.
+    assert 0.0 < diag["peak_score"] < detect.MIN_TEMPLATE_SCORE
+    assert detect.score_verdict(diag["peak_score"]) == "nothing tonal"
+
+    # A time inside the window has a score; one outside it is honestly unknown, not zero.
+    mid = float(diag["times"][diag["times"].size // 2])
+    assert np.isfinite(detect.best_score_near(diag, mid))
+    assert not np.isfinite(detect.best_score_near(diag, mid + 10_000.0))
+    assert detect.score_verdict(float("nan")) == "not analysed"
+
+
+def test_diagnostics_peak_where_a_real_pass_is():
+    """The peak has to land on the pass, or the number means nothing."""
+    audio, truths = synth.render_scene(
+        [(100.0, dict(f0=113.0, speed=72.0, cpa_distance=900.0, duration=90.0))],
+        duration=220.0, sample_rate=8000, snr_db=0.0, seed=3,
+    )
+    diag = {}
+    dets = detect.detect(audio, 8000, band=(50.0, 300.0), n_harmonics=4, diagnostics=diag)
+    assert any(d.is_aircraft for d in dets)
+
+    # `t_centre` is the scene-level time of the pass; `t0_heard` in the truth dict is
+    # relative to the clip the flyover was rendered from, and is 0.0 here.
+    on_pass = detect.best_score_near(diag, truths[0]["t_centre"])
+    off_pass = detect.best_score_near(diag, 15.0, tolerance_s=10.0)
+    assert on_pass > detect.MIN_TEMPLATE_SCORE
+    assert on_pass > off_pass
+    assert detect.score_verdict(on_pass) == "scored, screened out"

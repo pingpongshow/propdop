@@ -209,3 +209,18 @@ def test_dashboard_still_works_without_javascript(client):
     """A meta refresh remains as the no-JS fallback."""
     body = client.get("/").text
     assert 'http-equiv="refresh"' in body
+
+
+def test_the_dashboard_shows_which_candidates_were_considered(client):
+    """The panel that distinguishes a deaf site from a missed detection."""
+    body = client.get("/").text
+    assert "Audible candidates considered" in body
+    assert 'id="candidates"' in body
+    # the fixture's quiet high-altitude track is expected-but-unheard, so it must appear
+    assert "verdict" in body
+
+
+def test_the_candidates_panel_refreshes_with_the_other_live_regions(client):
+    d = client.get("/api/live").json()
+    assert "candidates" in d
+    assert "verdict" in d["candidates"] or "No expected-but-unheard" in d["candidates"]

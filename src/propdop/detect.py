@@ -49,6 +49,11 @@ from . import physics
 # a null, not chosen by eye.
 MIN_TEMPLATE_SCORE = 20.0
 
+# Measured ceiling of the pure-noise distribution (same 6 x 200 s pink-noise runs). A score
+# under this is indistinguishable from wind; it is what lets a *negative* be read as "nothing
+# tonal was there" rather than merely "we found nothing".
+NOISE_CEILING_SCORE = 8.9
+
 
 @dataclass
 class Detection:
@@ -169,11 +174,17 @@ def detect(
     refine: bool = True,
     c: float = 343.0,
     t_offset: float = 0.0,
+    diagnostics: dict | None = None,
 ) -> list[Detection]:
     """Find flyovers with no prior knowledge of when or whether an aircraft passed.
 
     `band` brackets plausible fundamentals. Detections are refined with the comb fit and then
     screened by `fit.plausible_aircraft`, which is what rejects road and rail sources.
+
+    If `diagnostics` is given it is filled with the best score reached at every analysed time,
+    whether or not it cleared `min_score`. Without that, a pass ADS-B says should have been
+    audible and was not produces no number at all, and there is no way to tell a microphone
+    that could not hear it from a detector that nearly did.
     """
     samples = np.asarray(samples, dtype=float)
     spec_hi = min(band[1] * (n_harmonics + 1), sample_rate / 2.0 * 0.95)
@@ -198,6 +209,11 @@ def detect(
     f0_lo = np.searchsorted(log_f, band[0])
     f0_hi = np.searchsorted(log_f, band[1])
 
+    # Best score at each frame over every template and every f0 row, recorded regardless of
+    # the threshold. `min_score` governs what is *reported*; this governs what can be *said*
+    # about a window where nothing was reported.
+    best_by_frame = np.full(times.size, -np.inf)
+
     peaks: list[tuple[float, float, float, float, float]] = []
     for tpl in bank:
         ker = tpl["kernel"]
@@ -211,6 +227,13 @@ def detect(
             continue
         sub = corr[keep]
         rows = rows[keep]
+        # Column j of `corr` centres the kernel on frame j + width//2. Kernel widths differ
+        # per template, so map back to frame indices before taking the running maximum.
+        cols = np.arange(sub.shape[1]) + ker.shape[1] // 2
+        inside = cols < times.size
+        if np.any(inside):
+            c_in = cols[inside]
+            best_by_frame[c_in] = np.maximum(best_by_frame[c_in], sub.max(axis=0)[inside])
         # local maxima only, so one strong pass does not produce a ridge of detections
         loc = ndimage.maximum_filter(sub, size=(9, max(3, int(round(5.0 / frame_dt)))))
         hits = np.nonzero((sub == loc) & (sub > min_score))
@@ -294,8 +317,46 @@ def detect(
         if not dup:
             merged.append(det)
 
+    if diagnostics is not None:
+        finite = np.isfinite(best_by_frame)
+        diagnostics["times"] = times + t_offset
+        diagnostics["best_score"] = np.where(finite, best_by_frame, np.nan)
+        diagnostics["peak_score"] = (
+            float(best_by_frame[finite].max()) if np.any(finite) else float("nan")
+        )
+        diagnostics["min_score"] = float(min_score)
+
     merged.sort(key=lambda x: x.t0_heard)
     return merged
+
+
+# A pass is heard over roughly d/v seconds, and the acoustic CPA time carries both fit error
+# and an unknown station clock offset early in a run, so the search for "did we score anything
+# where ADS-B said to look" has to be a window rather than a sample.
+SCORE_WINDOW_S = 25.0
+
+
+def best_score_near(
+    diagnostics: dict, t: float, tolerance_s: float = SCORE_WINDOW_S
+) -> float:
+    """Peak template score within `tolerance_s` of `t`; NaN if that time was not analysed."""
+    times = np.asarray(diagnostics.get("times") if diagnostics else (), dtype=float)
+    best = np.asarray(diagnostics.get("best_score") if diagnostics else (), dtype=float)
+    if times.size == 0 or best.size != times.size:
+        return float("nan")
+    sel = (np.abs(times - t) <= tolerance_s) & np.isfinite(best)
+    return float(best[sel].max()) if np.any(sel) else float("nan")
+
+
+def score_verdict(score: float, min_score: float = MIN_TEMPLATE_SCORE) -> str:
+    """Plain words for a template score, so a negative result reads without the context."""
+    if not np.isfinite(score):
+        return "not analysed"
+    if score < NOISE_CEILING_SCORE:
+        return "nothing tonal"
+    if score < min_score:
+        return "below threshold"
+    return "scored, screened out"
 
 
 def expected_f0_band(n_blades: int, rpm_range: tuple[float, float] = (1800.0, 2900.0)):

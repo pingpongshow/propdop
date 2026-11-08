@@ -120,6 +120,9 @@ CREATE TABLE IF NOT EXISTS unheard (
     adsb_slant_m      REAL,
     adsb_agl_m        REAL,
     adsb_bearing_deg  REAL,
+    -- Best blind-detector score anywhere near the expected arrival, stored even though it
+    -- failed to clear the threshold. A negative without this number is uninterpretable.
+    best_template_score REAL,
     UNIQUE (station_id, t_heard_cpa, icao24)
 );
 
@@ -274,7 +277,7 @@ class Store:
                 "scint_exponent": "REAL",
                 "freq_coherence": "REAL",
             },
-            "unheard": {"adsb_bearing_deg": "REAL"},
+            "unheard": {"adsb_bearing_deg": "REAL", "best_template_score": "REAL"},
         }
         for table, cols in wanted.items():
             have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -395,11 +398,15 @@ class Store:
             self.conn.commit()
         return int(cur.lastrowid)
 
-    def add_unheard(self, station_id: str, geom: adsb.PassGeometry) -> None:
+    def add_unheard(
+        self, station_id: str, geom: adsb.PassGeometry, best_score: float | None = None
+    ) -> None:
+        if best_score is not None and not np.isfinite(best_score):
+            best_score = None       # NaN round-trips through SQLite as a float, not as NULL
         self.execute(
             "INSERT OR REPLACE INTO unheard (station_id, t_heard_cpa, icao24, type_code,"
-            " adsb_speed_mps, adsb_slant_m, adsb_agl_m, adsb_bearing_deg)"
-            " VALUES (?,?,?,?,?,?,?,?)",
+            " adsb_speed_mps, adsb_slant_m, adsb_agl_m, adsb_bearing_deg,"
+            " best_template_score) VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 station_id,
                 geom.t_heard_cpa,
@@ -409,6 +416,7 @@ class Store:
                 geom.slant_cpa_m,
                 geom.altitude_agl_m,
                 geom.bearing_deg,
+                best_score,
             ),
         )
         with self._lock:
@@ -420,8 +428,13 @@ class Store:
         result: associate.JoinResult,
         blade_counts: dict[str, int] | None = None,
         surface: dict | None = None,
+        unheard_scores: dict | None = None,
     ) -> dict:
-        """Persist a whole join: matches, unexplained detections and unheard passes."""
+        """Persist a whole join: matches, unexplained detections and unheard passes.
+
+        `unheard_scores` maps `(icao24, round(t_heard_cpa, 1))` to the best detector score
+        near that arrival, so each negative is stored with the evidence behind it.
+        """
         blade_counts = blade_counts or {}
         n_matched = n_unexplained = 0
         for m in result.matches:
@@ -444,7 +457,9 @@ class Store:
                 )
                 n_unexplained += 1
         for g in result.unheard:
-            self.add_unheard(station_id, g)
+            self.add_unheard(
+                station_id, g, (unheard_scores or {}).get((g.icao24, round(g.t_heard_cpa, 1)))
+            )
         return {
             "matched": n_matched,
             "unexplained": n_unexplained,
@@ -617,6 +632,21 @@ class Store:
             " registration, fit_slant_m FROM passes"
             " WHERE adsb_bearing_deg IS NOT NULL ORDER BY t_heard_cpa DESC LIMIT ?",
             (limit,),
+        )
+        return [dict(r) for r in rows]
+
+    def recent_unheard(self, limit: int = 12) -> list[dict]:
+        """Recent passes ADS-B said should have been audible, with the score they reached.
+
+        The score is the whole point of the row. A Bonanza at 1.4 km that scored 6 says the
+        microphone never had the signal; one that scored 18 says the detector nearly had it,
+        and the threshold -- not the siting -- is what to look at.
+        """
+        rows = self.query_all(
+            "SELECT t_heard_cpa, icao24, type_code, adsb_speed_mps, adsb_slant_m,"
+            " adsb_agl_m, adsb_bearing_deg, best_template_score FROM unheard"
+            " ORDER BY t_heard_cpa DESC LIMIT ?",
+            (int(limit),),
         )
         return [dict(r) for r in rows]
 

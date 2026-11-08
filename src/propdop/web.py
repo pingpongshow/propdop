@@ -20,13 +20,14 @@ For most passes the clip is long gone, and the tracks are the permanent record.
 
 from __future__ import annotations
 
+import datetime as _dt
 import html
 import math
 from pathlib import Path
 
 import numpy as np
 
-from . import __version__, store
+from . import __version__, detect, store
 
 try:  # keep the core import-light; the web extra is optional
     from fastapi import FastAPI, HTTPException
@@ -43,7 +44,7 @@ LIVE_SCRIPT = """<script>
 // Vanilla, no framework, no CDN -- the page has to work on a network with no outbound route.
 (function () {
   var FIELDS = {radar: "radar", overhead: "overhead", capture: "capture",
-                "radar-note": "radar_note"};
+                candidates: "candidates", "radar-note": "radar_note"};
   var dot = document.getElementById("state-dot");
   var label = document.getElementById("state-label");
   function tick() {
@@ -155,6 +156,19 @@ def _fmt(x, digits=2, dash="—") -> str:
     except (TypeError, ValueError):
         return _esc(x)
     return dash if not math.isfinite(f) else f"{f:,.{digits}f}"
+
+
+def _score(x) -> float:
+    """NULL (a row stored before scoring existed) reads as 'not analysed', not as zero."""
+    return float("nan") if x is None else float(x)
+
+
+def _clock(ts, fmt: str = "%m-%d %H:%M:%S") -> str:
+    """Local wall-clock time, which is how the operator reports hearing an aircraft."""
+    try:
+        return _dt.datetime.fromtimestamp(float(ts)).strftime(fmt)
+    except (TypeError, ValueError, OSError):
+        return "&mdash;"
 
 
 def line_svg(
@@ -577,7 +591,8 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             lag = live.get("capture_lag_s")
             cap = (
                 "<table><tr><th>uptime</th><th>blocks</th><th>analyses</th><th>ADS-B</th>"
-                "<th>failures</th><th>drift</th><th>capture lag</th></tr>"
+                "<th>failures</th><th>drift</th><th>capture lag</th>"
+                "<th>analysis cost</th></tr>"
                 f"<tr><td>{_fmt(live.get('uptime_s', 0) / 3600, 1)} h</td>"
                 f"<td>{_fmt(live.get('blocks_captured'), 0)}</td>"
                 f"<td>{_fmt(live.get('analyses'), 0)}</td>"
@@ -586,13 +601,59 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
                 f"<td>{_fmt(live.get('adsb_failures'), 0)}/"
                 f"{_fmt(live.get('analysis_failures'), 0)}</td>"
                 f"<td>{_fmt(nd.get('drift_ppm'), 0)} ppm</td>"
-                f"<td>{_fmt(lag, 1)} s</td></tr></table>"
+                f"<td>{_fmt(lag, 1)} s</td>"
+                f"<td>{_fmt(live.get('analysis_duration_s'), 0)} s of "
+                f"{_fmt(live.get('analysis_period_s'), 0)} s</td></tr></table>"
             )
             if lag is not None and lag > 15.0:
                 cap += ('<p class="bad">Capture is falling behind real time by '
                         f"{_fmt(lag, 0)} s. Samples are being dropped and every timestamp "
                         "downstream is wrong.</p>")
+            # Two different complaints: one says the headroom is gone, the other says audio
+            # went unanalysed -- and an unanalysed stretch leaves no trace anywhere else,
+            # not even an unheard row, so it has to be said here.
+            if live.get("coverage_gaps"):
+                cap += ('<p class="bad">Analysis has taken longer than the '
+                        f"{_fmt(live.get('analysis_window_s'), 0)} s window "
+                        f"{_fmt(live.get('coverage_gaps'), 0)} time(s): stretches of audio "
+                        "were never analysed at all, and leave no row behind. Lower "
+                        "<code>analysis_period_s</code> or <code>max_detections</code>, or "
+                        "move to a faster machine.</p>")
+            elif live.get("analysis_overruns"):
+                cap += ('<p class="note">Analysis has overrun its '
+                        f"{_fmt(live.get('analysis_period_s'), 0)} s period "
+                        f"{_fmt(live.get('analysis_overruns'), 0)} time(s). Coverage still "
+                        "holds while it stays under the "
+                        f"{_fmt(live.get('analysis_window_s'), 0)} s window, but there is no "
+                        "headroom left.</p>")
             state = "listening" if live.get("listening") else "stalled"
+
+        cand_rows = db.recent_unheard(limit=10)
+        if cand_rows:
+            cand = (
+                "<table><tr><th>expected</th><th>type</th><th>range</th><th>bearing</th>"
+                "<th>score</th><th>verdict</th></tr>"
+                + "".join(
+                    f"<tr><td>{_clock(r['t_heard_cpa'], '%H:%M:%S')}</td>"
+                    f"<td>{_esc(r.get('type_code') or '&mdash;')}</td>"
+                    f"<td>{_fmt((r.get('adsb_slant_m') or 0) / 1000, 1)} km</td>"
+                    f"<td>{_fmt(r.get('adsb_bearing_deg'), 0)}&deg;</td>"
+                    f"<td>{_fmt(r.get('best_template_score'), 1)}</td>"
+                    f"<td class=\"mut\">"
+                    f"{_esc(detect.score_verdict(_score(r.get('best_template_score'))))}"
+                    f"</td></tr>"
+                    for r in cand_rows
+                )
+                + "</table>"
+                + '<p class="note">Reported above '
+                + f"{detect.MIN_TEMPLATE_SCORE:.0f}; pure wind noise peaks at "
+                + f"{detect.NOISE_CEILING_SCORE:.1f}. Below that the tone never reached the "
+                + "microphone at all, and the siting is the limit rather than the threshold. "
+                + "Blank scores are rows stored before scoring was recorded.</p>"
+            )
+        else:
+            cand = ('<p class="note">No expected-but-unheard passes recorded yet. Either '
+                    "nothing has come within range, or everything that did was heard.</p>")
 
         heard_sectors = sum(1 for e in envelope if e.get("max_heard_m"))
         best = max((e["max_heard_m"] or 0) for e in envelope) if envelope else 0
@@ -609,6 +670,7 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
         return {
             "radar": radar_svg(envelope, overhead, recent),
             "overhead": over,
+            "candidates": cand,
             "capture": cap,
             "radar_note": note,
             "state": state,
@@ -634,9 +696,6 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             em = db.error_model()
             trend = db.epsilon_trend()
             hours = db.scintillation_by_hour()
-            envelope = db.detection_envelope()
-            recent = db.recent_positions()
-            overhead = (live or {}).get("overhead") or []
             eps_med = em.get("epsilon_median")
 
             frag = _live_fragments(db)
@@ -651,62 +710,6 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
                     ("overhead now", _fmt(frag["n_overhead"], 0), ' id="n-overhead"'),
                 ]
             )
-
-            heard_sectors = sum(1 for e in envelope if e.get("max_heard_m"))
-            best = max((e["max_heard_m"] or 0) for e in envelope) if envelope else 0
-            radar_note = (
-                f"Shaded lobe: farthest pass actually heard, per bearing sector "
-                f"({heard_sectors}/{len(envelope)} sectors have data, best "
-                f"{_fmt(best / 1000, 1)} km). Hollow marks are passes ADS-B says should have "
-                f"been audible and were not &mdash; a notch with hollow marks beyond it is a "
-                f"direction this site is deaf in."
-                if heard_sectors
-                else "No heard passes yet, so there is no measured envelope. Live traffic is "
-                "shown; the lobe fills in as passes are detected."
-            )
-
-            if live is None:
-                live_tbl = ('<p class="bad">The capture pipeline is not running. Start it with '
-                            "<code>docker compose up -d propdop</code>.</p>")
-            else:
-                nd = live.get("node", {})
-                live_tbl = (
-                    "<table><tr><th>uptime</th><th>blocks</th><th>analyses</th>"
-                    "<th>ADS-B</th><th>failures</th><th>drift</th><th>capture lag</th></tr>"
-                    f"<tr><td>{_fmt(live.get('uptime_s', 0) / 3600, 1)} h</td>"
-                    f"<td>{_fmt(live.get('blocks_captured'), 0)}</td>"
-                    f"<td>{_fmt(live.get('analyses'), 0)}</td>"
-                    f"<td>{_fmt(live.get('adsb_polls'), 0)} polls,"
-                    f" {_fmt(live.get('adsb_tracks'), 0)} tracks</td>"
-                    f"<td>{_fmt(live.get('adsb_failures'), 0)}/"
-                    f"{_fmt(live.get('analysis_failures'), 0)}</td>"
-                    f"<td>{_fmt(nd.get('drift_ppm'), 0)} ppm</td>"
-                    f"<td>{_fmt(live.get('capture_lag_s'), 1)} s</td></tr></table>"
-                )
-                lag = live.get("capture_lag_s")
-                if lag is not None and lag > 15.0:
-                    live_tbl += (
-                        '<p class="bad">Capture is falling behind real time by '
-                        f"{_fmt(lag, 0)} s. Samples are being dropped and every timestamp "
-                        "downstream is wrong.</p>"
-                    )
-
-            over_tbl = '<p class="note">Nothing within range right now.</p>'
-            if overhead:
-                over_tbl = (
-                    "<table><tr><th>type</th><th>reg</th><th>bearing</th><th>range</th>"
-                    "<th>AGL</th><th>speed</th></tr>"
-                    + "".join(
-                        f"<tr><td>{_esc(a.get('type_code') or '&mdash;')}</td>"
-                        f"<td>{_esc(a.get('registration') or '&mdash;')}</td>"
-                        f"<td>{_fmt(a['bearing_deg'], 0)}&deg;</td>"
-                        f"<td>{_fmt(a['slant_m'] / 1000, 1)} km</td>"
-                        f"<td>{_fmt(a.get('agl_m'), 0)} m</td>"
-                        f"<td>{_fmt(a.get('speed_mps'), 0)} m/s</td></tr>"
-                        for a in overhead[:12]
-                    )
-                    + "</table>"
-                )
 
             prod = "".join(
                 f"<tr><td>{_esc(p['product'])}</td>"
@@ -774,6 +777,8 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
       <span><i style="background:var(--acc);opacity:.35"></i>hearing envelope</span>
     </div>
     <p class="note" id="radar-note">{frag["radar_note"]}</p>
+    <h2>Audible candidates considered</h2>
+    <div id="candidates">{frag["candidates"]}</div>
   </div>
   <div>
     <h2>Capture</h2>
@@ -814,11 +819,9 @@ f^(7/6) across harmonics. Absence is a decisive negative, not a null result.</p>
                 " FROM passes ORDER BY t_heard_cpa DESC LIMIT ?",
                 (limit,),
             )
-            import datetime as _dt
-
             body_rows = "".join(
                 f'<tr><td><a href="/pass/{r["pass_id"]}">{r["pass_id"]}</a></td>'
-                f'<td>{_dt.datetime.fromtimestamp(r["t_heard_cpa"]).strftime("%m-%d %H:%M:%S")}</td>'
+                f'<td>{_clock(r["t_heard_cpa"])}</td>'
                 f'<td>{_esc(r["registration"] or "&mdash;")}</td>'
                 f'<td>{_esc(r["type_code"] or "&mdash;")}</td>'
                 f'<td>{_fmt(r["fit_f0_hz"], 2)}</td>'

@@ -395,6 +395,69 @@ humidity channel at 1.6 kHz and jet tones available without a re-deploy.
 ADS-B: RTL-SDR dongle plus a 1090 MHz antenna, `readsb`/`tar1090` in a container on the server. Mount the
 antenna as high as practical — your low-altitude coverage *is* the instrument's sensitivity floor.
 
+### 6.1 Compute budget, and whether a Raspberry Pi is enough
+
+Measured on one core of an Apple M2 Max, on a 420 s window at the 8 kHz archive rate — the exact
+shape the pipeline analyses:
+
+| Stage | Cost |
+|---|---|
+| Decimate 1 s of 48 kHz audio (the only *continuous* cost) | 0.93 ms = **0.09 % of real time** |
+| Whitened spectrogram, 420 s | 0.95 s |
+| Log-frequency map | 0.01 s |
+| Build the 35-template bank | 0.03 s |
+| Blind search — 35 FFT correlations over a 284 × 839 map | **1.14 s** |
+| Comb-fit refinement | **2.5–5.2 s per candidate** |
+| Whole window, quiet sky (3 candidates) | **16.8 s** |
+| Whole window, busy sky (11 candidates) | **27.6 s** |
+
+Two things follow. **The blind search is nearly free** — under 2 % of the window's cost — so
+listening continuously is not what costs anything; the comb fit is, and it scales with *traffic*
+rather than with time. And **capture is free**: 0.09 % of real time means the capture thread is
+never the problem, which is why the GIL contention of §3.4 was fixed by moving analysis to a
+subprocess rather than by making it cheaper.
+
+Scaled by published single-core Geekbench 6 figures (M2 Max ≈ 2759; Pi 5 ≈ 764–774; Pi 4 ≈ 340),
+widened to allow for the Pi's far weaker memory bandwidth on the FFT stages:
+
+| Board | Quiet sky | Busy sky | Saturated (24 candidates) |
+|---|---|---|---|
+| Pi 5 (×3.6–6) | 60–101 s → **17–25 % of a core** | 99–166 s → 25–36 % | 216–360 s → 42–55 % |
+| Pi 4 (×8–11) | 136–185 s → **31–38 %** | 224–304 s → 43–50 % | 486–660 s → 62–69 % |
+
+**Peak CPU never exceeds ~69 % of one core even on a Pi 4, and both boards are quad-core**, with
+analysis already in its own process. Nothing in the package touches CUDA, so moving off a GPU
+machine costs no capability, and `python:3.13-slim` is multi-arch with aarch64 wheels for
+numpy/scipy, so the container needs no change.
+
+Memory is the tighter budget: 173 MB of standing ring buffers (115 MB live at 48 kHz + 58 MB
+archive at 8 kHz, both float32) + ~101 MB parent interpreter + **486 MB peak in the analysis
+child** + ~150 MB for the web container ≈ **900 MB peak**. Comfortable on 4 GB, tight on 2 GB.
+
+So the processor is not the binding constraint. These are the real ones, in order:
+
+1. **Analysis cadence, not throughput.** `analysis_period_s` is a *start-to-start* period. It was
+   originally a wait *after* each run, making the true cadence `duration + period` — invisible at
+   17 s per window, but at a Pi 4's 136–304 s it pushes the cadence past the 420 s window and
+   stretches of audio go unanalysed. An unanalysed stretch leaves **no row at all**, not even an
+   `unheard` one, so it cannot be recovered or even noticed after the fact. The loop now subtracts
+   the elapsed time and counts both overruns and coverage gaps, and the dashboard says so.
+2. **USB bus contention.** An RTL-SDR at 2.4 Msps alongside a USB sound card on one host controller
+   drops samples — a well-known Pi 4 problem, better but not absent on a Pi 5. Separate the buses,
+   and budget roughly another 40 % of a core for `readsb` decoding. **Pulling ADS-B from a network
+   feed instead removes both costs**, which is what makes a Pi 4 viable.
+3. **Storage.** SQLite in WAL mode plus a 1 GB rolling corpus will wear out a microSD. Use a USB
+   SSD, or NVMe on a Pi 5.
+4. **Thermals.** A Pi 5 under sustained load wants the active cooler.
+
+Clock accuracy is *not* on this list: `node.ClockModel` measures the sound card's true rate from
+the capture timeline (the deployed card reads 3,687 ppm fast, fitted to a 1.2 ms residual over
+180 s), and §4.1 recovers the absolute offset from ADS-B. A board with no RTC is fine.
+
+A Pi used as a **remote microphone node only** — capture, decimate, ship — is trivially within
+reach at 0.09 % of real time, with no analysis on the board at all. That is the NETWORK.md
+topology, and it is the use a Pi is unambiguously suited to.
+
 ## 7. Per-pass pipeline
 
 1. **Predict.** From the ADS-B track and each node position, solve the retarded time for the acoustic

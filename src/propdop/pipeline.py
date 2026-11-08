@@ -51,12 +51,15 @@ def _analysis_worker(payload: dict):
 
     audio = payload["audio"]
     rx = _geo.Receiver(**payload["receiver"])
+    diag: dict = {}
     dets = _detect.detect(
         audio,
         payload["rate"],
         band=tuple(payload["band"]),
         n_harmonics=payload["n_harmonics"],
         t_offset=payload["t_offset"],
+        max_detections=payload["max_detections"],
+        diagnostics=diag,
     )
     aircraft = [d for d in dets if d.is_aircraft]
     tracks = _adsb.tracks_from_readsb(payload["snapshots"])
@@ -68,6 +71,10 @@ def _analysis_worker(payload: dict):
         "n_aircraft": len(aircraft),
         "n_tracks": len(tracks),
         "n_candidates": len(geoms),
+        # Carried back so the parent can score its own (window-clamped) unheard list.
+        "score_times": diag.get("times"),
+        "score_best": diag.get("best_score"),
+        "peak_score": diag.get("peak_score"),
     }
 
 
@@ -83,6 +90,10 @@ class PipelineConfig:
     archive_s: float = 1800.0
     band: tuple[float, float] = (50.0, 300.0)
     n_harmonics: int = 4
+    # Caps the worst case. Refinement costs 2.5-5.2 s per candidate, so a saturated window is
+    # what pushes a slow board past its analysis period (DESIGN.md 6.1); the default is the
+    # detector's own, and small boards want it lower.
+    max_detections: int = 24
     adsb_poll_s: float = 15.0
     adsb_dist_nm: int = 40
     adsb_round_deg: float = 0.1
@@ -135,6 +146,10 @@ class Pipeline:
             "passes_stored": 0,
             "unheard_stored": 0,
             "last_analysis": None,
+            "last_peak_score": None,
+            "analysis_duration_s": None,
+            "analysis_overruns": 0,
+            "coverage_gaps": 0,
             "last_error": None,
             "adsb_backoff": 1.0,
         }
@@ -270,12 +285,35 @@ class Pipeline:
         # the instrument look dead exactly when someone is watching it start.
         self._stop.wait(min(self.cfg.first_analysis_s, self.cfg.analysis_window_s))
         while not self._stop.is_set():
+            started = time.monotonic()
             try:
                 self.analyse_once()
             except Exception:
                 self.stats["analysis_failures"] += 1
                 self.stats["last_error"] = traceback.format_exc(limit=4)
-            self._stop.wait(self.cfg.analysis_period_s)
+            self._stop.wait(self._note_analysis_cost(time.monotonic() - started))
+
+    def _note_analysis_cost(self, elapsed: float) -> float:
+        """Record what an analysis cost, and say how long to wait before the next one.
+
+        `analysis_period_s` is a *start-to-start* period, so the wait is what is left of it.
+        Waiting the whole period after each run instead makes the real cadence
+        `duration + period`, which on a slow machine silently exceeds `analysis_window_s` --
+        and audio no window covers is never analysed and never reported, because an unanalysed
+        stretch produces no rows at all, not even `unheard` ones. On the deployment machine one
+        window costs ~17 s against a 300 s period, so the difference never showed; measured on
+        a Raspberry Pi 4 the same window is 136-304 s, where it loses passes outright.
+
+        Coverage therefore holds while the cadence stays inside the window. Both thresholds are
+        counted because they say different things: an overrun means the headroom is gone, a
+        coverage gap means data was lost.
+        """
+        self.stats["analysis_duration_s"] = elapsed
+        if elapsed > self.cfg.analysis_period_s:
+            self.stats["analysis_overruns"] += 1
+        if elapsed > self.cfg.analysis_window_s:
+            self.stats["coverage_gaps"] += 1
+        return max(0.0, self.cfg.analysis_period_s - elapsed)
 
     # -- the work ------------------------------------------------------------------------
 
@@ -303,6 +341,7 @@ class Pipeline:
             "rate": rate,
             "band": list(self.cfg.band),
             "n_harmonics": self.cfg.n_harmonics,
+            "max_detections": self.cfg.max_detections,
             "t_offset": t_offset,
             "snapshots": snapshots,
             "receiver": {
@@ -334,8 +373,18 @@ class Pipeline:
             g for g in result.unheard if t_offset <= g.t_heard_cpa <= t_offset + window
         ]
 
+        # Score every negative where ADS-B said to look, so "not detected" carries a number.
+        diag = {"times": out.get("score_times"), "best_score": out.get("score_best")}
+        unheard_scores = {
+            (g.icao24, round(g.t_heard_cpa, 1)): detect.best_score_near(diag, g.t_heard_cpa)
+            for g in result.unheard
+        }
+
         counts = self.db.record_join(
-            self.cfg.station_id, result, blade_counts=self.db.infer_blade_counts()
+            self.cfg.station_id,
+            result,
+            blade_counts=self.db.infer_blade_counts(),
+            unheard_scores=unheard_scores,
         )
         for d in aircraft:
             self._save_corpus_clip(d, audio, rate, t_offset)
@@ -344,10 +393,12 @@ class Pipeline:
         self.stats["passes_stored"] += counts["matched"] + counts["unexplained"]
         self.stats["unheard_stored"] += counts["unheard"]
         self.stats["last_analysis"] = time.time()
+        self.stats["last_peak_score"] = out.get("peak_score")
         self._write_status()
         return {
             "window_start": t_offset,
             "window_s": window,
+            "peak_score": out.get("peak_score"),
             "detections": out["n_detections"],
             "aircraft": out["n_aircraft"],
             "tracks": out["n_tracks"],
@@ -437,6 +488,8 @@ class Pipeline:
             "adsb_tracks": len(self.current_tracks()),
             "passes_in_db": self.db.count("passes"),
             "unheard_in_db": self.db.count("unheard"),
+            "analysis_period_s": self.cfg.analysis_period_s,
+            "analysis_window_s": self.cfg.analysis_window_s,
             **{k: v for k, v in self.stats.items() if k != "started"},
         }
 
