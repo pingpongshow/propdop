@@ -1,5 +1,7 @@
 """The ADS-B join, end to end: synthetic audio plus matching synthetic tracks."""
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -364,3 +366,84 @@ def test_a_cpa_the_track_never_reached_is_not_a_pass():
     # so it is offered to neither half of the join
     assert [g.icao24 for g in adsb.audible_candidates([full], RX)] == ["cc0003"]
     assert adsb.audible_candidates([inbound], RX) == []
+
+
+def _snapshots_holding_each_fix(hold, jitter_m=8.0, seed=0, n=60, poll=4.0):
+    """Polling a feed that re-reports a fix until the aircraft makes a new one.
+
+    `t` is `now - seen_pos`, so every repeat of one fix arrives with the identical timestamp
+    -- which is what makes them recognisable as the same measurement.
+    """
+    tr = adsb.synthetic_track(RX, 70.0, 1500.0, 1200.0, t_cpa=300.0, jitter_m=jitter_m,
+                              seed=seed, half_span_s=120.0)
+    snaps = []
+    for k in range(n):
+        now = 180.0 + k * poll
+        fix_t = 180.0 + (k // hold) * hold * poll
+        j = int(np.argmin(np.abs(tr.times - fix_t)))
+        snaps.append({"now": now, "aircraft": [{
+            "hex": "aa0001", "t": "C172", "r": "N1",
+            "lat": float(tr.lat[j]), "lon": float(tr.lon[j]),
+            "alt_geom": float(tr.alt_hae_m[j] / 0.3048),
+            "seen_pos": now - fix_t}]})
+    return snaps
+
+
+@pytest.mark.parametrize("hold", [1, 2, 3, 5, 8])
+def test_a_repeated_position_report_is_one_measurement_not_several(hold):
+    """Kept, repeats are a staircase, and the speed is read off a derivative.
+
+    A fix still being broadcast when the next poll lands arrives again unchanged. Counting it
+    twice makes the trajectory a sequence of flat stretches joined by steps; the smoothing
+    spline then either chases it or is told to ignore it, and the speed comes out wrong by
+    tens of per cent -- measured at -33% and +332% before these were dropped.
+    """
+    tracks = adsb.tracks_from_readsb(_snapshots_holding_each_fix(hold))
+    assert len(tracks) == 1
+    track = tracks[0]
+    assert len(track) == -(-60 // hold), "repeats of one fix were kept"
+    g = adsb.pass_geometry(track, RX)
+    assert abs(g.speed_mps - 70.0) / 70.0 < 0.02
+
+
+def test_each_axis_is_smoothed_to_its_own_noise():
+    """Altitude and position do not share an error distribution.
+
+    Geometric altitude arrives in 25 ft steps, so on a level-flight track its scatter is near
+    zero while the horizontal scatter is tens of metres. One figure for all three applied one
+    axis's noise to another -- on live traffic, 0.05 m east against 9.2 m north on one track,
+    50 m east against 1.1 m up on another.
+    """
+    rng = np.random.default_rng(0)
+    t = np.arange(0.0, 240.0)
+    east = 1200.0 + rng.normal(0, 40.0, t.size)          # noisy
+    north = 70.0 * (t - 120.0)                            # clean
+    up = np.round(np.full(t.size, 900.0) / 7.62) * 7.62   # quantised to 25 ft, so flat
+
+    sig = [adsb._position_sigma_m(x) for x in (east, north, up)]
+    assert sig[0] > 20.0, "the noisy axis has to be recognised as noisy"
+    assert sig[1] < sig[0] / 4.0, "the clean axis must not inherit the noisy one's scatter"
+    assert sig[2] <= adsb.POSITION_SIGMA_FLOOR_M * 1.5, "a flat quantised axis is not noisy"
+
+
+def test_the_smoothing_floor_is_the_feeds_own_quantisation():
+    """Below the quantisation step there is nothing to resolve, and asking FITPACK for a
+    misfit it cannot reach is what produced "s too small" in the station's journal."""
+    assert adsb.POSITION_SIGMA_FLOOR_M == pytest.approx(25.0 * 0.3048 / 12 ** 0.5, rel=1e-9)
+    # a level-flight altitude column is the same figure over and over; its MAD is zero, and
+    # the estimator must not report a precision finer than the step that produced it
+    flat = np.full(60, 900.0)
+    assert adsb._position_sigma_m(flat) <= adsb.POSITION_SIGMA_FLOOR_M * 1.5
+
+
+def test_a_quantised_track_does_not_make_fitpack_complain():
+    """The warning this whole estimator exists to remove, reproduced from the shape of real
+    data rather than from Gaussian noise -- which is why the first fix did not end it."""
+    for hold in (1, 2, 3, 5, 8):
+        tracks = adsb.tracks_from_readsb(_snapshots_holding_each_fix(hold))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            adsb.pass_geometry(tracks[0], RX)
+        spline = [w for w in caught if "spline" in str(w.message)
+                  or "s too small" in str(w.message).replace("\n", " ")]
+        assert spline == [], f"hold={hold}: {[str(w.message) for w in spline]}"

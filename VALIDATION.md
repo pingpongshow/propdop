@@ -637,3 +637,55 @@ outscored three of the four real matches. Left as measured rather than acted on,
 changing a detection threshold on 39 rows would be fitting a threshold to an anecdote; what
 the station needs first is enough matched passes to put a number on where the two populations
 separate.
+
+### The fix that was tested against the wrong kind of noise
+
+Enabling persistent logging on the station turned up the warning the smoothing fix above was
+supposed to have ended, still firing four times in the two and a half hours since that fix was
+deployed — twice as the old "maximal number of iterations", and twice as a message that had
+not appeared before:
+
+```
+A theoretically impossible result was found during the iteration
+process for finding a smoothing spline with fp = s: s too small.
+```
+
+The estimator was validated against Gaussian jitter, where it recovers the injected noise to
+within 2 %. Real ADS-B is not Gaussian; it is **quantised**, and in two ways the synthetic
+tracks had no way to show.
+
+**Geometric altitude arrives in 25 ft steps.** An aircraft in level flight reports the same
+figure for a minute, so more than half its second differences are exactly zero and the median
+absolute deviation — chosen precisely because it ignores outliers — ignores the steps and
+measures the flat stretches between them. On 43 tracks taken live from the station's own feed,
+the altitude axis estimated **σ ≈ 0** on nine of them, and all three axes on two more. Clipped
+to the 1.0 m floor, that made `s` *smaller* than the fixed value it replaced.
+
+**A position report is re-broadcast until the aircraft fixes a new one.** `t` is already
+`now - seen_pos`, so each repeat arrives with an identical timestamp: the same measurement,
+counted again. Kept, the trajectory becomes a staircase — flat stretches joined by steps — and
+the speed is read off the derivative of a spline fitted to it. Measured against known truth,
+with one fix held across *k* polls:
+
+| fix held for | speed error, as deployed | after dropping the repeats |
+|---|---|---|
+| 1 poll | +0.07 % | +0.07 % |
+| 2 polls | −22.8 % | +0.05 % |
+| 3 polls | −33.0 % | +0.07 % |
+| 5 polls | +331.8 % | +0.13 % |
+| 8 polls | −94.8 % | +0.12 % |
+
+Three things changed. Repeated reports are dropped where tracks are assembled, because they
+are one observation. Each axis is smoothed to **its own** noise rather than the median of the
+three — east, north and up do not share an error distribution, and the median was applying one
+axis's scatter to another in both directions (0.05 m east against 9.2 m north on one live
+track, 50 m east against 1.1 m up on another). And the floor is now the feed's own
+quantisation, 25 ft / √12 = 2.2 m, rather than an arbitrary 1 m: below the step size there is
+nothing to resolve, and asking FITPACK for a misfit it cannot reach is what produced the
+warning in the first place.
+
+The lesson is narrower than "test with real data" and worth stating exactly: **a noise model
+is an assumption, and validating it against noise generated from that same assumption tests
+nothing.** The synthetic check was not weak — it swept five jitter levels, straight and
+turning tracks, sixteen seeds each — and it could not have failed, because every sample it drew
+was independent and Gaussian by construction. What found this was a log file.

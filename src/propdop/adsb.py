@@ -31,7 +31,13 @@ from . import geo, physics
 # the fallback for a track too short to infer it from. 10 m is roughly what NACp delivers
 # horizontally, and geometric altitude is quantised to 25 ft = 7.6 m. See `_smooth_enu`.
 POSITION_SIGMA_M = 10.0
-POSITION_SIGMA_FLOOR_M = 1.0
+# The feed cannot be more precise than its own quantisation, so claiming less than this is
+# claiming precision ADS-B does not have. Geometric altitude is reported in 25 ft steps, and a
+# uniform quantiser of step q has standard deviation q/sqrt(12) = 2.2 m; horizontal CPR is
+# finer, so the same floor is conservative there. It was 1.0 m, which on a level-flight track
+# -- where the altitude column is the same 25 ft figure over and over -- let `s` collapse
+# below even the old fixed value and brought back the FITPACK warning it was meant to end.
+POSITION_SIGMA_FLOOR_M = 25.0 * 0.3048 / 12 ** 0.5
 POSITION_SIGMA_CEIL_M = 200.0
 
 NON_PROPELLER_CLASSES = frozenset({"J", "R"})
@@ -195,8 +201,18 @@ def _position_sigma_m(x: NDArray[np.float64]) -> float:
     if x.size < 5:
         return POSITION_SIGMA_M
     d2 = np.diff(x, n=2)
-    mad = float(np.median(np.abs(d2 - np.median(d2))))
-    sigma = mad / 0.6745 / np.sqrt(6.0)
+    scale = 0.6745 * np.sqrt(6.0)
+    sigma = float(np.median(np.abs(d2 - np.median(d2)))) / scale
+
+    # A median absolute deviation of zero does not mean the data is clean. It means more than
+    # half the second differences are identical, which is what a *quantised* series looks
+    # like: an aircraft in level flight reports the same 25 ft altitude figure for a minute,
+    # and a held position report repeats exactly. The MAD then measures the flat stretches and
+    # ignores the steps between them, so the spline is told to chase a staircase. The RMS sees
+    # the steps, so fall back to it -- on genuinely noisy data the two agree, and it only
+    # takes over where the MAD has stopped describing anything.
+    if sigma < POSITION_SIGMA_FLOOR_M:
+        sigma = float(np.sqrt(np.mean(d2 ** 2))) / np.sqrt(6.0)
     return sigma if np.isfinite(sigma) else POSITION_SIGMA_M
 
 
@@ -234,12 +250,19 @@ def _smooth_enu(track: Track, receiver: geo.Receiver):
     enu = receiver.enu_of(track.lat, track.lon, track.alt_hae_m)
     t = track.times
     k = 3 if t.size >= 4 else max(1, t.size - 1)
-    sigma = float(np.clip(
-        np.median([_position_sigma_m(enu[:, i]) for i in range(3)]),
-        POSITION_SIGMA_FLOOR_M, POSITION_SIGMA_CEIL_M,
-    ))
-    s = max(len(t) * sigma**2, 1.0)
-    return [interpolate.UnivariateSpline(t, enu[:, i], k=k, s=s) for i in range(3)]
+    # Per axis, not one figure for all three. East, north and up do not share an error
+    # distribution: altitude arrives in 25 ft steps while position does not, so on a real
+    # track the altitude estimate is near zero while the horizontal ones are 10-100 m. Taking
+    # the median across the three applied one axis's noise to another, in both directions --
+    # measured on live traffic, one track had 0.05 m east and 9.2 m north, another 50 m east
+    # and 1.1 m up. Each axis gets its own spline anyway, so each gets its own `s`.
+    out = []
+    for i in range(3):
+        sigma = float(np.clip(_position_sigma_m(enu[:, i]),
+                              POSITION_SIGMA_FLOOR_M, POSITION_SIGMA_CEIL_M))
+        out.append(interpolate.UnivariateSpline(t, enu[:, i], k=k,
+                                                s=max(len(t) * sigma**2, 1.0)))
+    return out
 
 
 def pass_geometry(
@@ -406,6 +429,24 @@ def tracks_from_readsb(
 
     tracks = []
     for icao, rec in by_icao.items():
+        # One position report, not one per snapshot that happened to see it. `t` is already
+        # the time the position was *fixed* (`now - seen_pos`), so a report still being
+        # broadcast when the next poll lands arrives again with the identical timestamp. Kept,
+        # those repeats are a staircase: flat stretches joined by steps, which a smoothing
+        # spline either chases or is told to ignore, and the speed read off its derivative is
+        # then wrong by tens of per cent. They are not extra evidence -- they are the same
+        # measurement, counted again.
+        seen: set[float] = set()
+        keep = []
+        for i, t in enumerate(rec["t"]):
+            key = round(float(t), 2)
+            if key in seen:
+                continue
+            seen.add(key)
+            keep.append(i)
+        if len(keep) < len(rec["t"]):
+            for field in ("t", "lat", "lon", "alt"):
+                rec[field] = [rec[field][i] for i in keep]
         if len(rec["t"]) < 4:
             continue
         tracks.append(
