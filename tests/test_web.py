@@ -409,3 +409,23 @@ def test_the_panel_falls_back_to_the_published_still(client):
     page = client.get("/").text
     assert 'id="spec-canvas"' not in page
     assert client.get("/api/live").json()["spectrogram"] is not None
+
+
+def test_the_live_panel_is_an_overlay_and_not_a_foreign_object(live_ring):
+    """iOS resolved the percentage sizing inside a `foreignObject` against the viewport, so
+    the canvas rendered several times its size, covered the axis labels and overflowed the
+    card. The canvas is now a sibling positioned over the plot rectangle, and the rectangle
+    is expressed as percentages of the viewBox so the two cannot drift apart."""
+    import re
+
+    db, _ = live_ring
+    page = TestClient(web.create_app(db)).get("/").text
+
+    assert "<foreignObject" not in page
+    assert page.index('id="spec-canvas"') < page.index('id="spec-svg"'), "canvas must be behind"
+    style = re.search(r'id="spec-canvas" style="([^"]+)"', page).group(1)
+    box = dict(kv.split(":") for kv in style.split(";"))
+    # the plot rectangle is x=48 y=10 w=586 h=228 inside a 720x268 viewBox
+    assert box["left"] == "6.6667%" and box["top"] == "3.7313%"
+    assert box["width"] == "81.3889%" and box["height"] == "85.0746%"
+    assert ".specwrap > canvas { position:absolute" in page, "the overlay CSS has to ship"

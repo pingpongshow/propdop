@@ -152,6 +152,15 @@ CSS = """
           --warn:#f0b357; --bad:#ff8d94; --ok:#4ade80; --card:#161920; --shadow:none;}
 }
 * { box-sizing:border-box }
+
+/* The live spectrogram: a canvas behind the axes, not inside them. See `spectrogram_svg`
+   for why this is an overlay rather than an SVG foreignObject. The SVG is what gives the
+   wrapper its height, so the canvas's percentages resolve against exactly the box the axes
+   are drawn around -- at any width, which is what makes the panel survive a phone. */
+.specwrap { position:relative; width:100%; overflow:hidden }
+.specwrap > svg { position:relative; z-index:1; display:block; width:100% }
+.specwrap > canvas { position:absolute; z-index:0; display:block;
+                     max-width:none; max-height:none }
 body { margin:0; padding:0; background:var(--bg); color:var(--fg);
        font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif;
        -webkit-font-smoothing:antialiased }
@@ -710,19 +719,23 @@ def spectrogram_svg(meta: dict | None, cache_bust: str = "",
     )
     # The propeller band, so the eye knows where to look.
     band_y0, band_y1 = fy(300.0), fy(50.0)
-    # A canvas cannot be an SVG child, and reproducing the viewBox's arithmetic in CSS to
-    # position one on top would be a second source of truth for the plot rectangle.
-    # `foreignObject` puts it inside the same coordinate system as the axes.
+    # A canvas cannot be an SVG child. `foreignObject` looks like the answer -- it would put
+    # one in the same coordinate system as the axes -- but its layout and clipping are not
+    # dependable: on iOS the percentage sizing resolved against the viewport instead of the
+    # box, so the canvas rendered at several times its size, covered the axis labels and
+    # overflowed the card. The portable arrangement is a positioned overlay, with the plot
+    # rectangle expressed as percentages of the viewBox so the two stay in step if the layout
+    # constants move. The SVG keeps its aspect ratio and fills the wrapper, so these resolve
+    # to the same rectangle the axes are drawn around, at any width.
     heat = (
-        f'<foreignObject x="{L}" y="{T}" width="{pw}" height="{ph}">'
-        f'<canvas xmlns="http://www.w3.org/1999/xhtml" id="spec-canvas"'
-        f' style="width:100%;height:100%;display:block"></canvas>'
-        f"</foreignObject>"
-        if live else
         f'<image x="{L}" y="{T}" width="{pw}" height="{ph}" preserveAspectRatio="none"'
         f' href="/spectrogram.png{cache_bust}"/>'
+        if not live else ""
     )
-    return f"""<svg viewBox="0 0 {W} {H}" width="100%" role="img" id="spec-svg"
+    plot_box = (f"left:{100.0 * L / W:.4f}%;top:{100.0 * T / H:.4f}%;"
+                f"width:{100.0 * pw / W:.4f}%;height:{100.0 * ph / H:.4f}%")
+    canvas = (f'<canvas id="spec-canvas" style="{plot_box}"></canvas>' if live else "")
+    return f"""<div class="specwrap">{canvas}<svg viewBox="0 0 {W} {H}" width="100%" role="img" id="spec-svg"
      aria-label="live spectrogram of the last {win:.0f} seconds, {f_lo:.0f} to {f_hi:.0f} Hz">
   <defs><linearGradient id="specramp" x1="0" y1="1" x2="0" y2="0">{stops}</linearGradient></defs>
   <style>
@@ -747,7 +760,7 @@ def spectrogram_svg(meta: dict | None, cache_bust: str = "",
   <text x="{W - R + 33}" y="{T + ph + 14}" class="cap">dB over median</text>
   <rect id="spec-hit" x="{L}" y="{T}" width="{pw}" height="{ph}" fill="transparent"
         data-flo="{f_lo}" data-fhi="{f_hi}" data-win="{win}"/>
-</svg>
+</svg></div>
 <p class="note" id="spec-readout">Brighter is louder than this minute's median at that
 frequency, so steady wind and mains hum sit near zero and a passing tone stands out as a
 sweeping curve. {freshness} <span id="spec-cursor" class="mono"></span></p>"""
