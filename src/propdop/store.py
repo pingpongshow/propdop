@@ -482,14 +482,25 @@ class Store:
     # -- product queries ----------------------------------------------------------------
 
     def detection_rate(self, station_id: str | None = None) -> float:
-        """Heard / (heard + should-have-been-heard). The denominator for 'unexplained'."""
+        """Heard / (heard + should-have-been-heard). The denominator for 'unexplained'.
+
+        Jets are excluded from the denominator. This instrument is a harmonic-comb matched
+        filter for propellers and a turbofan has no comb to find, so counting airliners as
+        missed detections measures nothing. The deployed station reported 14.3 % while 10 of
+        its 12 misses were airliners; the real propeller denominator was 2.
+
+        Rows recorded before `engine_class` was populated have it NULL, and those are kept:
+        unknown is treated as a possible propeller, which is the conservative direction.
+        """
         where, args = ("WHERE station_id = ?", (station_id,)) if station_id else ("", ())
         heard = self.query_one(
             f"SELECT COUNT(*) FROM passes {where} {'AND' if where else 'WHERE'} icao24 IS NOT NULL",
             args,
         )[0]
+        not_jet = "(engine_class IS NULL OR engine_class NOT IN ('J', 'R'))"
         missed = self.query_one(
-            f"SELECT COUNT(*) FROM unheard {where}", args
+            f"SELECT COUNT(*) FROM unheard {where} {'AND' if where else 'WHERE'} {not_jet}",
+            args,
         )[0]
         total = heard + missed
         return heard / total if total else float("nan")

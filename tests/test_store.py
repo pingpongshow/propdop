@@ -281,3 +281,35 @@ def test_a_missing_score_is_stored_as_null_not_as_zero(world):
     assert st2.recent_unheard()[0]["best_template_score"] is None
     st.close()
     st2.close()
+
+
+def test_detection_rate_excludes_jets_from_the_denominator(world):
+    """A turbofan has no comb to find, so counting it as a missed detection measures nothing.
+
+    The deployed station reported a 14.3 % detection rate while 10 of its 12 misses were
+    airliners. Rows predating `engine_class` have it NULL and are kept, since unknown is
+    treated as a possible propeller.
+    """
+    st = store.Store(":memory:")
+    st.add_station(store.Station.from_receiver(RX))
+    st.record_join("alpha", world, blade_counts={"C172": 2})
+    base = st.detection_rate()
+
+    st.execute(
+        "INSERT INTO unheard (station_id, t_heard_cpa, icao24, type_code, engine_class)"
+        " VALUES ('alpha', 1.0, 'jet001', 'B738', 'J')"
+    )
+    assert st.detection_rate() == pytest.approx(base), "a jet must not move the rate"
+
+    st.execute(
+        "INSERT INTO unheard (station_id, t_heard_cpa, icao24, type_code, engine_class)"
+        " VALUES ('alpha', 2.0, 'pst001', 'C172', 'P')"
+    )
+    assert st.detection_rate() < base, "a propeller miss must lower it"
+
+    st.execute(
+        "INSERT INTO unheard (station_id, t_heard_cpa, icao24, type_code, engine_class)"
+        " VALUES ('alpha', 3.0, 'unk001', 'ZZZZ', NULL)"
+    )
+    assert st.detection_rate() < base, "unknown counts as a possible propeller"
+    st.close()
