@@ -27,6 +27,13 @@ from . import geo, physics
 # conflating them is how a jet the detector did fire on becomes an unexplained detection: with
 # no candidate to match, the one product that must never be wrong reports a non-cooperative
 # aircraft. Measured on AeroSonicDB, 2 of 474 turbofan clips fire at the deployed threshold.
+# Bounds on the per-sample ADS-B position noise the trajectory spline is allowed to infer, and
+# the fallback for a track too short to infer it from. 10 m is roughly what NACp delivers
+# horizontally, and geometric altitude is quantised to 25 ft = 7.6 m. See `_smooth_enu`.
+POSITION_SIGMA_M = 10.0
+POSITION_SIGMA_FLOOR_M = 1.0
+POSITION_SIGMA_CEIL_M = 200.0
+
 NON_PROPELLER_CLASSES = frozenset({"J", "R"})
 JET_CLASSES = NON_PROPELLER_CLASSES      # retained name, used by older callers
 
@@ -155,6 +162,11 @@ class PassGeometry:
     elevation_deg: float = float("nan")
     engine_class: str | None = None
     track: Track | None = None
+    # Whether the observed track actually brackets the closest approach, i.e. the aircraft was
+    # seen receding as well as approaching. False means the minimum sits on an endpoint, so
+    # this is not a CPA but "the closest it got before the track ran out" -- see
+    # `pass_geometry`.
+    cpa_bracketed: bool = True
 
     @property
     def expected_audible(self) -> bool:
@@ -172,17 +184,61 @@ class PassGeometry:
         return self.slant_cpa_m / max(self.speed_mps, 1e-6)
 
 
+def _position_sigma_m(x: NDArray[np.float64]) -> float:
+    """Per-sample position noise along one axis, from the scatter of second differences.
+
+    A trajectory is smooth, so its second difference is near zero and what remains is noise,
+    with variance 6*sigma^2. Taken as a median absolute deviation rather than a standard
+    deviation: a dropped report or a mode-C altitude step is an outlier, and must not be
+    allowed to set the smoothing for the whole track.
+    """
+    if x.size < 5:
+        return POSITION_SIGMA_M
+    d2 = np.diff(x, n=2)
+    mad = float(np.median(np.abs(d2 - np.median(d2))))
+    sigma = mad / 0.6745 / np.sqrt(6.0)
+    return sigma if np.isfinite(sigma) else POSITION_SIGMA_M
+
+
 def _smooth_enu(track: Track, receiver: geo.Receiver):
     """Cubic splines of the ENU trajectory.
 
     Smoothed deliberately: differentiating raw ADS-B positions puts kinks in the modelled curve
     that the audio does not have, which is a documented cause of wrong answers in the
     geolocation literature. A dropped position report should not become a feature.
+
+    `s` is the total allowed misfit, so per point it is the *variance of the position error*.
+    It was a hard-coded 4 m^2 -- a 2 m RMS that ADS-B does not deliver. FITPACK cannot reach a
+    misfit that small, which is why the station's log filled with "the maximal number of
+    iterations maxit (set to 20 by the program) allowed for finding a smoothing spline with
+    fp=s has been reached: s too small". The spline returned in that state interpolates the
+    noise, which is the exact failure this function exists to prevent, and it put a 10-25 %
+    error on the *truth* side of a join whose speed tolerance is `SIGMA_SPEED_FRAC` = 10 %.
+
+    No single constant fixes it, because the noise is not a constant: it depends on the
+    aircraft's equipment and on how far away it is. Smoothing less than the noise tracks the
+    noise; smoothing more than it cuts the corner on a turn. So the noise is measured from the
+    track itself, and `s` follows it. Median speed error over 16 seeds, against known truth:
+
+    | position noise | s = 4n (deployed) | s = 100n | measured from the track |
+    |---|---|---|---|
+    | 0 m, turning | 0.11 % | 0.96 % | **0.13 %** |
+    | 10 m, straight | 9.47 % | 0.06 % | **0.04 %** |
+    | 25 m, straight | 19.67 % | 9.64 % | **0.11 %** |
+    | 40 m, straight | 25.00 % | 25.83 % | **0.19 %** |
+    | 40 m, turning | 23.82 % | 27.55 % | **1.37 %** |
+
+    The estimator recovers the jitter it was given to within 2 % (5.1, 10.1, 25.3, 40.6 m for
+    5, 10, 25, 40), so this is self-calibration rather than another tuned constant.
     """
     enu = receiver.enu_of(track.lat, track.lon, track.alt_hae_m)
     t = track.times
     k = 3 if t.size >= 4 else max(1, t.size - 1)
-    s = max(len(t) * 4.0, 1.0)  # metres^2 of allowed misfit per point
+    sigma = float(np.clip(
+        np.median([_position_sigma_m(enu[:, i]) for i in range(3)]),
+        POSITION_SIGMA_FLOOR_M, POSITION_SIGMA_CEIL_M,
+    ))
+    s = max(len(t) * sigma**2, 1.0)
     return [interpolate.UnivariateSpline(t, enu[:, i], k=k, s=s) for i in range(3)]
 
 
@@ -212,6 +268,14 @@ def pass_geometry(
     else:
         t_cpa = float(grid[i])
 
+    # A minimum that lands on an endpoint is not a closest approach: the aircraft was still
+    # approaching (or already receding) when the track ran out, and the "CPA" is wherever the
+    # observation happened to stop. The station filed a Bonanza as unheard at a predicted
+    # 3017 m, then heard it 36 s later when the next window saw the real 828 m pass -- one
+    # aircraft, in both halves of the detection rate. Reported rather than rejected here,
+    # because the forward join and the reverse one want different things from it.
+    bracketed = 0 < i < grid.size - 1
+
     d = slant(t_cpa)
     vel = np.array([sx.derivative()(t_cpa), sy.derivative()(t_cpa), sz.derivative()(t_cpa)])
     speed = float(np.linalg.norm(vel))
@@ -234,6 +298,7 @@ def pass_geometry(
         elevation_deg=elevation,
         engine_class=track.engine_class,
         track=track,
+        cpa_bracketed=bracketed,
     )
 
 
@@ -270,6 +335,14 @@ def audible_candidates(
             continue
         g = pass_geometry(tr, receiver, c=c)
         if g is None or g.slant_cpa_m > max_slant_m or g.speed_mps < min_speed_mps:
+            continue
+        # An unbracketed CPA is an extrapolation, and wrong in a specific direction: too far
+        # and too early, because the aircraft is still inbound. It is no use to either half of
+        # the join -- a match made against it is a match to the wrong geometry, and a miss
+        # recorded against it is a miss on a pass that has not happened yet. Consecutive
+        # analysis windows overlap by design, so the next one sees the completed pass; this is
+        # what that overlap is for.
+        if not g.cpa_bracketed:
             continue
         out.append(g)
     return sorted(out, key=lambda g: g.t_heard_cpa)

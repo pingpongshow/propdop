@@ -425,3 +425,73 @@ def test_a_rejected_high_scoring_candidate_keeps_its_audio(tmp_path, monkeypatch
         assert not list((tmp_path / "corpus").glob("pass_*.flac"))
     finally:
         p.stop()
+
+
+def _snapshots_for(track, hexid, type_code, times):
+    return [
+        {
+            "now": float(t),
+            "aircraft": [
+                {
+                    "hex": hexid, "t": type_code, "r": "N99999",
+                    "lat": float(np.interp(t, track.times, track.lat)),
+                    "lon": float(np.interp(t, track.times, track.lon)),
+                    "alt_geom": float(np.interp(t, track.times, track.alt_hae_m) / 0.3048),
+                    "seen_pos": 0.1,
+                }
+            ],
+        }
+        for t in times
+    ]
+
+
+def test_overlapping_windows_do_not_duplicate_the_negatives(tmp_path):
+    """The miss column needs the same de-duplication the hit column already had.
+
+    Windows overlap by `analysis_window_s - analysis_period_s`, and `t_heard_cpa` is
+    recomputed from a different set of ADS-B snapshots each time, so it moves by a few seconds
+    -- past the UNIQUE constraint on (station, time, icao24). Counting one pass twice inflates
+    the denominator of the station's own detection rate.
+    """
+    t_heard = 200.0
+    src = node.SyntheticSource(np.zeros(8000 * 600), nominal_rate=8000)   # nothing to hear
+    p = pipeline.Pipeline(make_config(tmp_path), source=src)
+    p.node.clock.t0 = 0.0
+    p.node.pump(blocks=600)
+
+    for drift in (0.0, 4.0):
+        tr = adsb.synthetic_track(RX, 70.0, 1500.0, 1200.0, heading_deg=20.0,
+                                  t_cpa=t_heard - 1500.0 / C + drift, icao24="bb0002",
+                                  type_code="C172")
+        p._snapshots = _snapshots_for(tr, "bb0002", "C172",
+                                      np.arange(t_heard - 120, t_heard + 120, 10.0))
+        p.analyse_once(seconds=600.0)
+
+    assert p.db.count("unheard") == 1
+
+
+def test_a_pass_the_station_heard_is_never_also_filed_as_unheard(tmp_path):
+    """Worse than double counting: the same aircraft in both halves of the detection rate.
+
+    The deployed station matched a Bonanza at 10:18:23 and recorded it unheard at 10:17:41.
+    """
+    t_heard = 200.0
+    samples, _ = scene_with_one_pass(t_heard=t_heard)
+    src = node.SyntheticSource(samples, nominal_rate=8000)
+    p = pipeline.Pipeline(make_config(tmp_path), source=src)
+    p.node.clock.t0 = 0.0
+    p.node.pump(blocks=600)
+
+    for drift in (0.0, 4.0):
+        tr = adsb.synthetic_track(RX, 90.0, 2000.0, 1800.0, heading_deg=40.0,
+                                  t_cpa=t_heard - 2000.0 / C + drift, icao24="aa0001",
+                                  type_code="C172")
+        p._snapshots = _snapshots_for(tr, "aa0001", "C172",
+                                      np.arange(t_heard - 120, t_heard + 120, 10.0))
+        out = p.analyse_once(seconds=600.0)
+
+    assert p.db.count("passes") == 1
+    heard = p.db.conn.execute("SELECT icao24 FROM passes WHERE icao24 IS NOT NULL").fetchall()
+    missed = p.db.conn.execute("SELECT icao24 FROM unheard").fetchall()
+    assert [r["icao24"] for r in heard] == ["aa0001"]
+    assert [r["icao24"] for r in missed] == []

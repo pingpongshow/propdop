@@ -52,6 +52,36 @@ def test_pass_geometry_survives_position_jitter():
     assert noisy.speed_mps == pytest.approx(clean.speed_mps, rel=0.15)
 
 
+@pytest.mark.parametrize("jitter_m", [10.0, 25.0])
+def test_adsb_truth_is_better_than_the_tolerance_it_is_compared_against(jitter_m):
+    """The truth side of the join has to be better than the join's own tolerances.
+
+    `SIGMA_SPEED_FRAC` is 10 %, so an ADS-B speed carrying a comparable error turns chi into a
+    comparison between two noisy numbers and the error model into a measurement of the spline.
+    The trajectory spline was allowed a hard-coded 4 m^2 of misfit per point -- a 2 m RMS that
+    ADS-B does not deliver -- which cost 10-25 % on speed at realistic jitter and filled the
+    station's log with FITPACK's "s too small".
+
+    Asserted on the distribution over seeds, not per seed: the tail is set by where the noise
+    happens to land around CPA and a single draw says little. Pinned against the join's
+    tolerances rather than against whatever the implementation achieves, which is how
+    `test_pass_geometry_survives_position_jitter` above came to record the defect instead of
+    catching it -- it allows 15 % on a quantity the join needs to 10 %.
+    """
+    speed, slant = [], []
+    for seed in range(20):
+        tr = adsb.synthetic_track(RX, 70.0, 1500.0, 1200.0, t_cpa=300.0,
+                                  jitter_m=jitter_m, seed=seed)
+        g = adsb.pass_geometry(tr, RX)
+        speed.append(abs(g.speed_mps - 70.0) / 70.0)
+        slant.append(abs(g.slant_cpa_m - 1500.0) / 1500.0)
+
+    assert np.median(speed) < 0.1 * associate.SIGMA_SPEED_FRAC
+    assert np.percentile(speed, 90) < 0.5 * associate.SIGMA_SPEED_FRAC
+    assert np.median(slant) < 0.1 * associate.SIGMA_SLANT_FRAC
+    assert max(slant) < 0.5 * associate.SIGMA_SLANT_FRAC
+
+
 def test_distant_traffic_is_not_a_candidate_but_a_jet_overhead_still_is():
     """The two questions the candidate list used to answer with one filter.
 
@@ -266,3 +296,71 @@ def test_blade_count_refuses_when_the_data_cannot_separate():
     assert best is None
     best, _ = adsb.infer_blade_count([])
     assert best is None
+
+
+def _bare_detection(t0, speed, cpa, f0=90.0):
+    return detect.Detection(t0_heard=t0, f0=f0, speed=speed, cpa_distance=cpa,
+                            template_score=30.0, is_aircraft=True, reason="ok")
+
+
+def test_one_detection_cannot_invent_a_clock_offset():
+    """A single residual plus a free offset is an exactly degenerate fit.
+
+    The scan slides the offset until that one detection's dt is zero, which removes the time
+    term from `_chi` and lets geometry alone decide the association. On the deployed station
+    this matched an aircraft 96 s away at chi 1.16, with the estimator reporting -96.4 s.
+    """
+    g = adsb.pass_geometry(adsb.synthetic_track(RX, 90.0, 2000.0, 1800.0, t_cpa=400.0), RX)
+    det = _bare_detection(g.t_heard_cpa + 96.0, g.speed_mps, g.slant_cpa_m)
+
+    assert associate.estimate_clock_offset([det], [g]) == 0.0
+    assert associate.join([det], [g]).matches == []
+    # ...and the detection is still reported, as an unexplained one rather than a bad match
+    assert len(associate.join([det], [g]).unexplained) == 1
+
+
+def test_a_real_offset_is_still_recovered_once_enough_passes_agree():
+    """The guard must not cost the station its self-calibration, which is the point of it."""
+    offset = 40.0
+    geoms, dets = [], []
+    for i, (v, d, agl) in enumerate([(90, 2000, 1800), (70, 1200, 900), (110, 3000, 2700),
+                                     (80, 1600, 1400)]):
+        g = adsb.pass_geometry(
+            adsb.synthetic_track(RX, v, d, agl, t_cpa=200.0 + 600.0 * i,
+                                 icao24="ac%04d" % i), RX)
+        geoms.append(g)
+        dets.append(_bare_detection(g.t_heard_cpa + offset, g.speed_mps, g.slant_cpa_m))
+
+    assert associate.estimate_clock_offset(dets, geoms) == pytest.approx(offset, abs=1.5)
+    assert len(associate.join(dets, geoms).matches) == 4
+
+
+def test_a_cpa_the_track_never_reached_is_not_a_pass():
+    """A minimum on the endpoint of an open track is not a closest approach.
+
+    The aircraft was still inbound when the snapshots ran out, so the "CPA" is wherever the
+    observation stopped -- always too far and too early. The station filed a Bonanza unheard
+    at a predicted 3017 m and then heard the real 828 m pass 36 s later, putting one aeroplane
+    in both halves of its own detection rate.
+    """
+    full = adsb.synthetic_track(RX, 70.0, 900.0, 700.0, t_cpa=300.0, half_span_s=120.0,
+                                icao24="cc0003")
+    # the same aircraft as the window saw it: snapshots stop 40 s before it gets there
+    inbound = adsb.Track(
+        icao24=full.icao24, times=full.times[full.times <= 260.0],
+        lat=full.lat[full.times <= 260.0], lon=full.lon[full.times <= 260.0],
+        alt_hae_m=full.alt_hae_m[full.times <= 260.0], type_code=full.type_code,
+        registration=full.registration, engine_class=full.engine_class,
+    )
+
+    g_full = adsb.pass_geometry(full, RX)
+    g_part = adsb.pass_geometry(inbound, RX)
+    assert g_full.cpa_bracketed is True
+    assert g_part.cpa_bracketed is False
+    # ...and it is wrong in the direction that matters: further away, and earlier
+    assert g_part.slant_cpa_m > g_full.slant_cpa_m * 1.3
+    assert g_part.t_heard_cpa < g_full.t_heard_cpa
+
+    # so it is offered to neither half of the join
+    assert [g.icao24 for g in adsb.audible_candidates([full], RX)] == ["cc0003"]
+    assert adsb.audible_candidates([inbound], RX) == []

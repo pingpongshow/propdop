@@ -140,6 +140,11 @@ class PipelineConfig:
     # so diagnostics can never crowd out the pass corpus.
     near_miss_fraction: float = 0.2
     dedup_window_s: float = 20.0
+    # Same idea for the negatives, but on a different scale and against a different clock.
+    # Measured on the deployed station: two windows reporting one arrival put it within 26 s
+    # (8 of 11 cases agreed to under 1 s), while the same aircraft genuinely coming round
+    # again -- an AS350 orbiting -- was 87 s away. 60 s sits between the two.
+    unheard_dedup_s: float = 60.0
     status_path: str | None = None
     spectrogram_path: str | None = None
     spectrogram_window_s: float = 60.0
@@ -479,6 +484,17 @@ class Pipeline:
         result.unheard = [
             g for g in result.unheard if t_offset <= g.t_heard_cpa <= t_offset + window
         ]
+        # ...and only once per pass. Consecutive windows overlap by
+        # `analysis_window_s - analysis_period_s`, so an aircraft crossing that overlap is
+        # offered to the join twice, and `t_heard_cpa` moves by a few seconds between the two
+        # because it is recomputed from a different set of ADS-B snapshots -- enough to slip
+        # past the UNIQUE constraint on (station, time, icao24). The positives were already
+        # deduplicated by `_already_stored` and the negatives were not, so the deployed station
+        # inflated the denominator of its own detection rate and, worse, filed aircraft it had
+        # just matched in the missed column. `adsb.pass_geometry` now refuses the worst of
+        # these at the source by flagging an unbracketed CPA; what is left here is the plain
+        # case of one completed pass that two overlapping windows both saw.
+        result.unheard = [g for g in result.unheard if not self._unheard_already_stored(g)]
 
         # Score every negative where ADS-B said to look, so "not detected" carries a number.
         #
@@ -565,6 +581,36 @@ class Pipeline:
             (self.cfg.station_id, t_heard, self.cfg.dedup_window_s),
         ).fetchone()
         return row is not None
+
+    def _unheard_overlap_s(self) -> float:
+        """How far apart two reports of one aircraft can be and still be the same pass."""
+        return self.cfg.unheard_dedup_s
+
+    def _unheard_already_stored(self, geom) -> bool:
+        """True if this arrival is on record already -- as a negative *or* as a match.
+
+        Both tables have to be consulted. A pass matched in one window and offered again by
+        the next is not an aircraft that went unheard; it is the one the station heard.
+        """
+        if not geom.icao24:
+            return False
+        tol = self._unheard_overlap_s()
+        # Compare ADS-B arrival against ADS-B arrival. `passes.t_heard_cpa` is the *acoustic*
+        # time and carries the fit's own error -- 96 s of it on one deployed match -- so
+        # comparing against that column finds a duplicate 96 s away and misses the one sitting
+        # on top of it. `adsb_t_heard_cpa` is the same quantity from the same source as the
+        # negative being tested, and on the station's three real cases it agreed to 0.6 s.
+        sql = (
+            "SELECT 1 FROM unheard"
+            " WHERE station_id = ? AND icao24 = ? AND ABS(t_heard_cpa - ?) < ?"
+            " UNION ALL"
+            " SELECT 1 FROM passes"
+            " WHERE station_id = ? AND icao24 = ?"
+            "   AND ABS(COALESCE(adsb_t_heard_cpa, t_heard_cpa) - ?) < ?"
+            " LIMIT 1"
+        )
+        args = (self.cfg.station_id, geom.icao24, geom.t_heard_cpa, tol) * 2
+        return self.db.conn.execute(sql, args).fetchone() is not None
 
     def _save_corpus_clip(self, det, audio, rate, t_offset, subdir=None, limit=None) -> None:
         """Keep the audio for a detected pass, within the capped corpus.
