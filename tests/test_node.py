@@ -149,3 +149,17 @@ def test_clock_is_sampled_before_the_blocking_read():
     nd.pump(blocks=12, wall_clock=lambda frame: fake_time["t"])
     # a perfect clock must come out as a perfect clock, not as a one-block error
     assert abs(nd.clock.drift_ppm) < 500.0
+
+
+def test_clock_discards_the_device_startup_transient():
+    """The device opens inside the first read, so the timestamp taken before it precedes any
+    audio. At the end of the fit that point has high leverage: in deployment it produced
+    3659 ppm of apparent drift, which is 2.5 s of timestamp error over ten minutes."""
+    rate = 8000
+    clk = node.ClockModel(nominal_rate=rate, t0=0.0)
+    startup = 2.5  # seconds the device took to start producing audio
+    for i in range(60):
+        frame = i * rate
+        wall = (0.0 if i == 0 else startup + i * 1.0)
+        clk.observe(frame, wall)
+    assert abs(clk.drift_ppm) < 500.0, f"startup transient leaked in: {clk.drift_ppm:.0f} ppm"

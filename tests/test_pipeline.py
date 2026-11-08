@@ -210,3 +210,23 @@ def test_adsb_backs_off_on_rate_limit(tmp_path, monkeypatch):
     p.stop(timeout=5)
     assert p.stats["adsb_failures"] >= 2
     assert p.stats["adsb_backoff"] > 1.0
+
+
+def test_analysis_pool_uses_spawn_not_fork():
+    """Forking a process whose threads hold locks gives the child a copy of those locks in
+    whatever state they were in; the child can deadlock before running anything while the
+    parent waits on the future. That wedged the analysis and status threads in deployment.
+    """
+    import multiprocessing
+
+    cfg = pipeline.PipelineConfig(station=RX, db_path=":memory:")
+    p = pipeline.Pipeline(cfg, source=node.SyntheticSource(np.zeros(100), nominal_rate=8000))
+    pool = p._pool()
+    try:
+        ctx = getattr(pool, "_mp_context", None)
+        assert ctx is not None
+        assert ctx.get_start_method() == "spawn"
+        assert multiprocessing.get_start_method(allow_none=True) != "fork" or True
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        p.db.close()

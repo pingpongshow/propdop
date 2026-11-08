@@ -20,6 +20,7 @@ Three properties matter more than features, because this runs unattended:
 from __future__ import annotations
 
 import concurrent.futures as _futures
+import multiprocessing as _mp
 import threading
 import time
 import traceback
@@ -159,8 +160,21 @@ class Pipeline:
             self._executor = None
 
     def _pool(self) -> "_futures.ProcessPoolExecutor":
+        """A **spawn**-context pool, not the platform default.
+
+        On Linux the default start method is fork, and forking a process whose other threads
+        hold locks gives the child a copy of those locks in whatever state they were in. The
+        child can then deadlock before it runs anything, and the parent sits on
+        `future.result(timeout=600)` for ten minutes.
+
+        That is exactly what happened in deployment: capture kept running, but the analysis
+        thread wedged on the second analysis and the status thread stalled with it. `spawn`
+        starts a clean interpreter and inherits no lock state.
+        """
         if self._executor is None:
-            self._executor = _futures.ProcessPoolExecutor(max_workers=1)
+            self._executor = _futures.ProcessPoolExecutor(
+                max_workers=1, mp_context=_mp.get_context("spawn")
+            )
         return self._executor
 
     def _guard(self, fn):

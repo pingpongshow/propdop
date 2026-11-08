@@ -79,6 +79,7 @@ class ClockModel:
     nominal_rate: int
     t0: float
     rate: float = 0.0
+    warmup_obs: int = 4
     _obs_frames: list[int] = field(default_factory=list)
     _obs_times: list[float] = field(default_factory=list)
 
@@ -93,11 +94,20 @@ class ClockModel:
         return np.round((np.asarray(t, dtype=float) - self.t0) * self.rate).astype(np.int64)
 
     def observe(self, frame: int, wall_time: float) -> None:
+        """Record a (frame, wall time) pair and refit.
+
+        The first few are discarded. The device is opened inside the first read, so the
+        timestamp taken before it precedes any audio by however long the device takes to start
+        -- and being at the extreme end of the fit, that point has high leverage. In deployment
+        it produced an apparent 3659 ppm of drift on a device actually running within a few
+        hundred ppm, which matters because 3659 ppm is 2.5 s of timestamp error over ten
+        minutes, comparable to the ADS-B match tolerance itself.
+        """
         self._obs_frames.append(int(frame))
         self._obs_times.append(float(wall_time))
-        if len(self._obs_frames) >= 3:
-            f = np.array(self._obs_frames, dtype=float)
-            t = np.array(self._obs_times, dtype=float)
+        if len(self._obs_frames) >= self.warmup_obs + 3:
+            f = np.array(self._obs_frames[self.warmup_obs :], dtype=float)
+            t = np.array(self._obs_times[self.warmup_obs :], dtype=float)
             slope, intercept = np.polyfit(f, t, 1)
             if slope > 0:
                 self.rate = 1.0 / slope
@@ -109,10 +119,10 @@ class ClockModel:
 
     @property
     def residual_s(self) -> float:
-        if len(self._obs_frames) < 3:
+        if len(self._obs_frames) < self.warmup_obs + 3:
             return float("nan")
-        f = np.array(self._obs_frames, dtype=float)
-        t = np.array(self._obs_times, dtype=float)
+        f = np.array(self._obs_frames[self.warmup_obs :], dtype=float)
+        t = np.array(self._obs_times[self.warmup_obs :], dtype=float)
         return float(np.std(t - self.time_of(f)))
 
 
