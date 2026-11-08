@@ -240,11 +240,20 @@ def _score(x) -> float:
 
 
 def _clock(ts, fmt: str = "%m-%d %H:%M:%S") -> str:
-    """Local wall-clock time, which is how the operator reports hearing an aircraft."""
+    """Wall-clock time, which is how the operator reports hearing an aircraft.
+
+    The zone is **always labelled**, because this is the one number on the dashboard that an
+    operator checks against their own memory and it is read off whatever zone the host happens
+    to be in. A Raspberry Pi ships as UTC, so a station in California shows 15:47 for a pass
+    its operator heard at 07:47 and the two records cannot be reconciled by eye. Nothing here
+    converts: inventing a zone the host has not been told about would be worse. The fix is
+    `timedatectl set-timezone`, and until then the label says which clock this is.
+    """
     try:
-        return _dt.datetime.fromtimestamp(float(ts)).strftime(fmt)
+        t = _dt.datetime.fromtimestamp(float(ts)).astimezone()
     except (TypeError, ValueError, OSError):
-        return "&mdash;"
+        return "—"
+    return f"{t.strftime(fmt)} {t.strftime('%Z') or t.strftime('%z')}"
 
 
 def line_svg(
@@ -742,8 +751,8 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
                 "<table><tr><th>type</th><th>reg</th><th>bearing</th><th>range</th>"
                 "<th>AGL</th><th>speed</th></tr>"
                 + "".join(
-                    f"<tr><td>{_esc(a.get('type_code') or '&mdash;')}</td>"
-                    f"<td>{_esc(a.get('registration') or '&mdash;')}</td>"
+                    f"<tr><td>{_esc(a.get('type_code') or '—')}</td>"
+                    f"<td>{_esc(a.get('registration') or '—')}</td>"
                     f"<td>{_fmt(a['bearing_deg'], 0)}&deg;</td>"
                     f"<td>{_fmt(a['slant_m'] / 1000, 1)} km</td>"
                     f"<td>{_fmt(a.get('agl_m'), 0)} m</td>"
@@ -808,14 +817,14 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
                 "<th>bearing</th><th>score</th><th>verdict</th><th>why rejected</th></tr>"
                 + "".join(
                     f"<tr><td>{_clock(r['t_heard_cpa'], '%H:%M:%S')}</td>"
-                    f"<td>{_esc(r.get('type_code') or '&mdash;')}</td>"
-                    f"<td>{_esc({'J': 'jet', 'T': 'turbo', 'P': 'piston'}.get(r.get('engine_class') or '', '&mdash;'))}</td>"
+                    f"<td>{_esc(r.get('type_code') or '—')}</td>"
+                    f"<td>{_esc({'J': 'jet', 'T': 'turbo', 'P': 'piston', 'R': 'rotor'}.get(r.get('engine_class') or '', '—'))}</td>"
                     f"<td>{_fmt((r.get('adsb_slant_m') or 0) / 1000, 1)} km</td>"
                     f"<td>{_fmt(r.get('adsb_bearing_deg'), 0)}&deg;</td>"
                     f"<td>{_fmt(r.get('best_template_score'), 1)}</td>"
                     f"<td class=\"mut\">"
                     f"{_esc(detect.score_verdict(_score(r.get('best_template_score'))))}"
-                    f"</td><td class=\"mut\">{_esc(r.get('reject_reason') or '&mdash;')}</td></tr>"
+                    f"</td><td class=\"mut\">{_esc(r.get('reject_reason') or '—')}</td></tr>"
                     for r in cand_rows
                 )
                 + "</table>"
@@ -1021,8 +1030,8 @@ f^(7/6) across harmonics. Absence is a decisive negative, not a null result.</p>
             body_rows = "".join(
                 f'<tr><td><a href="/pass/{r["pass_id"]}">{r["pass_id"]}</a></td>'
                 f'<td>{_clock(r["t_heard_cpa"])}</td>'
-                f'<td>{_esc(r["registration"] or "&mdash;")}</td>'
-                f'<td>{_esc(r["type_code"] or "&mdash;")}</td>'
+                f'<td>{_esc(r["registration"] or "—")}</td>'
+                f'<td>{_esc(r["type_code"] or "—")}</td>'
                 f'<td>{_fmt(r["fit_f0_hz"], 2)}</td>'
                 f'<td>{_fmt(r["fit_speed_mps"], 1)}</td>'
                 f'<td>{_fmt(r["adsb_speed_mps"], 1)}</td>'
@@ -1079,8 +1088,16 @@ f^(7/6) across harmonics. Absence is a decisive negative, not a null result.</p>
                     ("match chi", _fmt(d["match_chi"], 2)),
                 ]
             )
+            # A caveat stored on the row and shown nowhere is not a caveat. These carry the
+            # two cases that most need saying out loud: a pass whose geometry predates the
+            # local-time-frame fix, and one kept on its ADS-B match against its own screening.
+            caveat = (
+                f'<p class="note"><strong>Caveat:</strong> {_esc(d["notes"])}</p>'
+                if d["notes"] else ""
+            )
             body = f"""<h2>Pass {pass_id} &middot; {_esc(d["registration"] or "unidentified")}
 &middot; {_esc(d["type_code"] or "unknown type")} &middot; {_esc(d["source"])}</h2>
+{caveat}
 <div class="grid">{cards}</div>
 <h2>Stored tracks</h2>
 <p class="note">Audio is kept only as a capped 1 GB corpus, so these per-harmonic tracks are
