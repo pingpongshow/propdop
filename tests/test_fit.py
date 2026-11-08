@@ -337,6 +337,62 @@ def test_rejects_a_fit_pinned_at_the_speed_bound():
     assert not ok and "pinned" in why, why
 
 
+def test_speed_floor_sits_between_the_truck_and_the_confirmed_aircraft():
+    """Assert the relationship, not the number, so a recalibration cannot silently break it.
+
+    Only one synthetic ground source depends on this gate at all -- a truck at 28 m/s and
+    200 m, which fits cleanly at ~26 m/s. Everything else is caught on fit quality,
+    resolvability or a solver bound. The upper constraint is real traffic: the station's first
+    ADS-B-confirmed pass fitted at 32.1 m/s against an ADS-B truth of 32.7, and the old 35.8
+    floor would have thrown it away.
+    """
+    fo = synth.Flyover(seed=3, snr_db=20, duration=90.0,
+                       speed=28, cpa_distance=200, f0=90.0)
+    samples, _ = synth.render(fo)
+    truck = fit.fit_comb(samples, fo.sample_rate, band=(60.0, 300.0), n_harmonics=3)
+
+    assert truck.speed < fit.MIN_AIRCRAFT_SPEED, (
+        f"the floor must reject the truck, which fits at {truck.speed:.1f} m/s"
+    )
+    assert fit.MIN_AIRCRAFT_SPEED < 32.1, (
+        "the floor must admit the station's ADS-B-confirmed pass, fitted at 32.1 m/s"
+    )
+    ok, why = fit.plausible_aircraft(truck)
+    assert not ok and "too slow" in why, why
+
+
+def test_every_solver_bound_is_reported_as_a_failed_fit():
+    """A wrong reason is worse than no reason: it sends the next person to the wrong threshold.
+
+    The station showed "too slow for an aircraft (20 m/s)" and "transition unresolvable" for
+    fits that had stopped on the speed floor and the 50 m distance floor. Both read as facts
+    about the source; both were facts about the optimiser. Every bound now says so, and says
+    which one, because the pinning check runs before the gates that phrase themselves as
+    statements about the aircraft.
+    """
+    import dataclasses
+
+    r = _good_fit()
+    for field, value, name in (
+        ("speed", fit.SPEED_BOUND_LO, "lower speed bound"),
+        ("speed", fit.SPEED_BOUND_HI, "upper speed bound"),
+        ("cpa_distance", fit.DIST_BOUND_LO, "distance floor"),
+        ("cpa_distance", fit.DIST_BOUND_HI, "distance ceiling"),
+    ):
+        ok, why = fit.plausible_aircraft(dataclasses.replace(r, **{field: value}))
+        assert not ok, f"{name} should be rejected"
+        assert name in why, f"expected {name!r} in {why!r}"
+
+
+def test_the_solver_box_and_the_gate_cannot_drift_apart():
+    """The gate is only meaningful if it names the same numbers the optimiser was given."""
+    import inspect
+
+    src = inspect.getsource(fit.fit_straight_pass)
+    for const in ("SPEED_BOUND_LO", "SPEED_BOUND_HI", "DIST_BOUND_LO", "DIST_BOUND_HI"):
+        assert const in src, f"{const} should set the solver's box, not a duplicated literal"
+
+
 def test_rejects_a_detection_beyond_the_audibility_radius():
     """The instrument must not report hearing what it refuses to expect hearing."""
     import dataclasses

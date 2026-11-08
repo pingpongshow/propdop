@@ -343,8 +343,8 @@ def fit_straight_pass(
     def resid(p):
         return (_model(t, p[0], p[1], p[2], p[3], c) - f) * w
 
-    lo = [f0 * 0.75, 20.0, 50.0, t.min() - 30.0]
-    hi = [f0 * 1.33, 250.0, 20000.0, t.max() + 30.0]
+    lo = [f0 * 0.75, SPEED_BOUND_LO, DIST_BOUND_LO, t.min() - 30.0]
+    hi = [f0 * 1.33, SPEED_BOUND_HI, DIST_BOUND_HI, t.max() + 30.0]
     t0c = float(np.clip(t0, lo[3], hi[3]))
 
     best = None
@@ -754,15 +754,53 @@ def fit_comb(
 # instead, which is how a locomotive gets reported as a 140 m/s flyover.
 
 
-MIN_AIRCRAFT_SPEED = 35.8  # m/s, 80 mph
+# CORRECTED against the station's first ADS-B-confirmed pass, which was doing 32.7 m/s by
+# ADS-B and would have been rejected by the old 35.8 m/s (80 mph) floor. DESIGN.md justified
+# that value as "road and rail run below ~35 m/s; aircraft above ~40 m/s"; the aircraft half
+# is false at a site near an airfield, where light singles approach at 55-65 kt (28-33 m/s)
+# and a Cub flies the circuit slower still. That traffic is precisely what the blind path
+# exists for, since ADS-B Out is not required in Class G below 10,000 ft.
+#
+# The usable range is narrow and was measured, not chosen. Of the synthetic ground sources,
+# four are rejected by other gates whatever this value is -- two on fit quality and
+# resolvability, two on the bound check above. Only one depends on this number: a truck at
+# 28 m/s and 200 m, which fits cleanly at 26.1 m/s with epsilon 0.38%. So the floor has to
+# clear 26.1 and stay under the 32.1 m/s the station fitted for its ADS-B-confirmed pass.
+#
+#     ground sources fit at or below   26.1 m/s
+#     the confirmed aircraft fit at    32.1 m/s   (ADS-B 32.7)
+#
+# 30.0 m/s sits in that gap, biased towards the ground-source end: a false "non-cooperative
+# aircraft" is the one error this instrument cannot afford, so the 15% margin goes above the
+# truck and the 6.5% margin below the aeroplane, which is still ~3.6 sigma on the 1.8% speed
+# error measured against ADS-B.
+#
+# 25.0 was tried first and the synthetic suite rejected it immediately -- the truck came back
+# as "aircraft: 26 m/s at 165 m". That is the same shape of failure as loosening MAX_EPSILON
+# to 0.045, and the same corpus caught it: AeroSonicDB has no labelled ground vehicles.
+#
+# No value separates these populations cleanly, so this is a floor for the blind path only.
+# Where ADS-B exists the join now runs first and confirms a slow aircraft on its trajectory,
+# which is how the 32.7 m/s pass was kept.
+MIN_AIRCRAFT_SPEED = 30.0  # m/s, 58 kt
 
 # The optimiser's upper speed bound (see `fit_comb`). A fit sitting on a bound means the
 # solver wanted to keep going and the model does not describe the data, so the value is not a
 # measurement -- it is where the search stopped. The deployed station produced exactly this:
 # a "211.8 m/s aircraft at 16.4 km", unmatched to any ADS-B track, which would have been
 # reported as a non-cooperative aircraft.
+# The optimiser's box, named once and shared with `fit_straight_pass`, so the gate below and
+# the solver cannot drift apart. A parameter resting on any of these is where the search
+# stopped, not a measurement -- and reporting it as one is how the station came to show
+# "too slow for an aircraft (20 m/s)" for a fit that had simply failed, and
+# "transition unresolvable" for one pinned against the 50 m distance floor. Both read as
+# statements about the source. Neither was.
+SPEED_BOUND_LO = 20.0
 SPEED_BOUND_HI = 250.0
-SPEED_BOUND_MARGIN = 0.98
+DIST_BOUND_LO = 50.0
+DIST_BOUND_HI = 20000.0
+BOUND_MARGIN = 0.02
+SPEED_BOUND_MARGIN = 1.0 - BOUND_MARGIN
 MIN_TRANSITION_S = 5.0
 MIN_COMB_CONTRAST = 0.35
 # CORRECTED against real audio (VALIDATION.md). Epsilon measures *precision*, not
@@ -809,6 +847,10 @@ def plausible_aircraft(
     Thresholds resolve to the module constants at call time rather than being bound as default
     arguments, so a deployment or a calibration run can set them once on the module and have
     every caller -- including `detect`, which does not forward them -- pick the new value up.
+
+    `min_comb_contrast` is accepted and **deliberately not applied**; see the note above on why
+    contrast is reported rather than gated. It stays in the signature so a caller that sets it
+    does not break, but setting it has no effect.
     """
     min_speed = MIN_AIRCRAFT_SPEED if min_speed is None else min_speed
     min_transition_s = MIN_TRANSITION_S if min_transition_s is None else min_transition_s
@@ -818,6 +860,23 @@ def plausible_aircraft(
     comb = float(result.notes.get("comb_score", 0.0))
     if not result.converged:
         return False, "fit did not converge"
+    # Pinning is checked FIRST, because every gate after this one phrases its rejection as a
+    # fact about the aircraft ("too slow", "unresolvable", "beyond the audibility radius").
+    # Said of a fit that stopped on a bound, each of those is a fabrication, and a wrong
+    # reason is worse than no reason: it sends the next person to recalibrate a threshold
+    # that was never involved.
+    at_bound = (
+        ("lower speed bound", result.speed <= SPEED_BOUND_LO * (1.0 + BOUND_MARGIN)),
+        ("upper speed bound", result.speed >= SPEED_BOUND_HI * (1.0 - BOUND_MARGIN)),
+        ("distance floor", result.cpa_distance <= DIST_BOUND_LO * (1.0 + BOUND_MARGIN)),
+        ("distance ceiling", result.cpa_distance >= DIST_BOUND_HI * (1.0 - BOUND_MARGIN)),
+    )
+    for name, hit in at_bound:
+        if hit:
+            return False, (
+                f"fit pinned at the {name} "
+                f"({result.speed:.0f} m/s at {result.cpa_distance:.0f} m)"
+            )
     if result.epsilon > max_epsilon:
         return False, (
             f"poor fit (epsilon {result.epsilon * 100:.2f}%, contrast {comb:.2f})"
@@ -827,8 +886,6 @@ def plausible_aircraft(
         return False, f"transition unresolvable ({transition:.1f} s)"
     if result.speed < min_speed:
         return False, f"too slow for an aircraft ({result.speed:.0f} m/s)"
-    if result.speed >= SPEED_BOUND_HI * SPEED_BOUND_MARGIN:
-        return False, f"fit pinned at the speed bound ({result.speed:.0f} m/s)"
     if result.cpa_distance > max_slant_m:
         # Not a claim that nothing is audible further away -- a statement that this instrument
         # does not consider anything past here audible, so believing a detection there while
