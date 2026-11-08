@@ -42,7 +42,7 @@ settings:
 
 | | |
 |---|---|
-| Propeller aircraft detected | **68.9 %** (turboprop 81.6 %, **piston 29.7 %**) |
+| Propeller aircraft detected | **68.2 %** (turboprop 80.7 %, **piston 29.7 %**) |
 | False positives, 274 length-matched label-verified windows | **0** |
 | Turbofans fired on | 2 of 474 *(mostly correct — jets are broadband, not comb-tonal)* |
 | Saab 340 blade-pass, 21 passes | **91.4 Hz measured vs 92.3 Hz theoretical** |
@@ -56,7 +56,7 @@ Four things that validation changed, which no synthetic test could have told us:
   the comb is not above the noise. They are most of what a backyard station hears.
 - **The detection threshold was calibrated against the wrong noise.** Pink noise peaks at 8.9;
   real background reaches 17.8. The threshold is now **18** and the `ε` gate **0.03**, both set
-  from measurement, which is what moved detection from 61.6 % to 68.9 %.
+  from measurement, which is what moved detection from 61.6 % to 68.2 %.
 - **Ground-source rejection is still untested on real audio** — nothing false-positived, so
   nothing exercised it.
 

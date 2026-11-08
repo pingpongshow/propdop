@@ -15,6 +15,16 @@ T0_KELVIN = 273.15
 P_REF_KPA = 101.325
 
 
+# How far away this instrument considers an aircraft audible at all.
+#
+# Shared deliberately. `adsb.audible_candidates` uses it to decide which ADS-B tracks *should*
+# have been heard, and `fit.plausible_aircraft` uses it to reject blind detections that fit
+# beyond it. Keeping one constant stops the two halves disagreeing -- the deployed station
+# reported an unexplained detection at 16.4 km while simultaneously holding that nothing past
+# 8 km is audible, which is the instrument contradicting itself rather than finding anything.
+AUDIBILITY_RADIUS_M = 8000.0
+
+
 def sound_speed(t_celsius: ArrayLike) -> NDArray[np.float64]:
     """Speed of sound in dry air, m/s. Humidity shifts this by <0.4%, below our noise floor."""
     return 331.3 * np.sqrt(1.0 + np.asarray(t_celsius, dtype=float) / T0_KELVIN)

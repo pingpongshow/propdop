@@ -144,7 +144,7 @@ def pass_geometry(
 def audible_candidates(
     tracks: list[Track],
     receiver: geo.Receiver,
-    max_slant_m: float = 8000.0,
+    max_slant_m: float | None = None,
     min_speed_mps: float = 30.0,
     exclude_jets: bool = True,
     c: float = 343.0,
@@ -155,6 +155,7 @@ def audible_candidates(
     probability against range. Without it you cannot tell a non-transmitting aircraft from one
     you simply failed to hear.
     """
+    max_slant_m = physics.AUDIBILITY_RADIUS_M if max_slant_m is None else max_slant_m
     out = []
     for tr in tracks:
         if exclude_jets and tr.is_jet:

@@ -266,3 +266,62 @@ def test_max_epsilon_stays_below_the_misfit_ground_source():
         f"MAX_EPSILON {fit.MAX_EPSILON} must stay below this misfit's "
         f"epsilon {r.epsilon:.4f}, or a car is reported as an aircraft"
     )
+
+
+def _good_fit():
+    fo = synth.Flyover(seed=1, snr_db=20, duration=90.0,
+                       speed=90, cpa_distance=2000, f0=90.0)
+    samples, _ = synth.render(fo)
+    r = fit.fit_comb(samples, fo.sample_rate, band=(60.0, 300.0), n_harmonics=3)
+    assert fit.plausible_aircraft(r)[0], "fixture must be accepted before it is perturbed"
+    return r
+
+
+def test_rejects_a_fit_pinned_at_the_speed_bound():
+    """A parameter sitting on its bound is where the search stopped, not a measurement.
+
+    The deployed station produced exactly this: "211.8 m/s at 16.4 km", unmatched to any ADS-B
+    track, which would have been published as a non-cooperative aircraft.
+    """
+    import dataclasses
+
+    r = _good_fit()
+    pinned = dataclasses.replace(r, speed=fit.SPEED_BOUND_HI)
+    ok, why = fit.plausible_aircraft(pinned)
+    assert not ok and "pinned" in why, why
+
+
+def test_rejects_a_detection_beyond_the_audibility_radius():
+    """The instrument must not report hearing what it refuses to expect hearing."""
+    import dataclasses
+
+    from propdop import physics
+
+    r = _good_fit()
+    far = dataclasses.replace(r, cpa_distance=physics.AUDIBILITY_RADIUS_M * 2.0)
+    ok, why = fit.plausible_aircraft(far)
+    assert not ok and "audibility radius" in why, why
+
+
+def test_both_halves_of_the_join_use_one_audibility_radius():
+    """`audible_candidates` and `plausible_aircraft` must not disagree about what is audible.
+
+    They did: the ADS-B half excluded anything past 8 km from "should have been heard" while
+    the acoustic half accepted a detection at 16.4 km and reported it as unexplained. One
+    shared constant is what stops that returning.
+    """
+    import dataclasses
+
+    from propdop import adsb, geo, physics
+
+    rx = geo.Receiver(lat=51.23, lon=-0.98, elevation_msl_m=68.0, geoid_offset_m=46.0)
+    radius = physics.AUDIBILITY_RADIUS_M
+
+    inside = adsb.synthetic_track(rx, 90.0, radius * 0.5, 1500.0, t_cpa=0.0, icao24="near01")
+    outside = adsb.synthetic_track(rx, 90.0, radius * 2.0, 1500.0, t_cpa=0.0, icao24="far001")
+    names = {g.icao24 for g in adsb.audible_candidates([inside, outside], rx)}
+    assert names == {"near01"}, names
+
+    r = _good_fit()
+    assert fit.plausible_aircraft(dataclasses.replace(r, cpa_distance=radius * 0.5))[0]
+    assert not fit.plausible_aircraft(dataclasses.replace(r, cpa_distance=radius * 2.0))[0]

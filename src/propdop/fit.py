@@ -735,6 +735,14 @@ def fit_comb(
 
 
 MIN_AIRCRAFT_SPEED = 35.8  # m/s, 80 mph
+
+# The optimiser's upper speed bound (see `fit_comb`). A fit sitting on a bound means the
+# solver wanted to keep going and the model does not describe the data, so the value is not a
+# measurement -- it is where the search stopped. The deployed station produced exactly this:
+# a "211.8 m/s aircraft at 16.4 km", unmatched to any ADS-B track, which would have been
+# reported as a non-cooperative aircraft.
+SPEED_BOUND_HI = 250.0
+SPEED_BOUND_MARGIN = 0.98
 MIN_TRANSITION_S = 5.0
 MIN_COMB_CONTRAST = 0.35
 # CORRECTED against real audio (VALIDATION.md). Epsilon measures *precision*, not
@@ -771,6 +779,7 @@ def plausible_aircraft(
     min_transition_s: float | None = None,
     min_comb_contrast: float | None = None,
     max_epsilon: float | None = None,
+    max_slant_m: float | None = None,
 ) -> tuple[bool, str]:
     """Whether a blind detection is plausibly an aircraft. Returns (verdict, reason).
 
@@ -785,6 +794,7 @@ def plausible_aircraft(
     min_transition_s = MIN_TRANSITION_S if min_transition_s is None else min_transition_s
     min_comb_contrast = MIN_COMB_CONTRAST if min_comb_contrast is None else min_comb_contrast
     max_epsilon = MAX_EPSILON if max_epsilon is None else max_epsilon
+    max_slant_m = physics.AUDIBILITY_RADIUS_M if max_slant_m is None else max_slant_m
     comb = float(result.notes.get("comb_score", 0.0))
     if not result.converged:
         return False, "fit did not converge"
@@ -797,4 +807,16 @@ def plausible_aircraft(
         return False, f"transition unresolvable ({transition:.1f} s)"
     if result.speed < min_speed:
         return False, f"too slow for an aircraft ({result.speed:.0f} m/s)"
+    if result.speed >= SPEED_BOUND_HI * SPEED_BOUND_MARGIN:
+        return False, f"fit pinned at the speed bound ({result.speed:.0f} m/s)"
+    if result.cpa_distance > max_slant_m:
+        # Not a claim that nothing is audible further away -- a statement that this instrument
+        # does not consider anything past here audible, so believing a detection there while
+        # refusing to expect one is incoherent. No speed cap instead: a Piaggio Avanti cruises
+        # at 207 m/s, so any cap tight enough to catch a 211 m/s misfit would reject real
+        # turboprops.
+        return False, (
+            f"beyond the audibility radius ({result.cpa_distance / 1000:.1f} km > "
+            f"{max_slant_m / 1000:.0f} km)"
+        )
     return True, f"aircraft: {result.speed:.0f} m/s at {result.cpa_distance:.0f} m"

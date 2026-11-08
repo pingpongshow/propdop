@@ -44,14 +44,17 @@ applies thresholds afterwards.
 measurement was run twice: once at the original constants, then again after they were
 recalibrated against it.
 
-| group | n | before `20 / ε 0.02` | after `18 / ε 0.03` |
+| group | n | before `20 / ε 0.02` | after `18 / ε 0.03` + gates |
 |---|---|---|---|
-| propeller | 151 | 61.6 % | **68.9 %** |
-| — turboprop | 114 | 72.8 % | **81.6 %** |
+| propeller | 151 | 61.6 % | **68.2 %** |
+| — turboprop | 114 | 72.8 % | **80.7 %** |
 | — piston | 37 | 27.0 % | 29.7 % |
 | no-aircraft, 51 s label-verified | 274 | **0** | **0** |
 | no-aircraft, 10 s curated | 1,236 | 0 | 0 |
 | turbofan fired on | 474 | 0 | 2 |
+
+The two physical-plausibility gates below cost 0.7 points of detection (68.9 → 68.2 %) and
+remove a class of result that was not merely wrong but unpublishable.
 
 The two turbofans are the cost of the lower threshold: jet peak scores reach 20.8, so at 18 a
 couple fit a comb to broadband noise. They are not false positives in the "unexplained
@@ -181,3 +184,33 @@ aircraft sweep said was free — broke ground-source rejection: a car at 30 m/s 
 as "48 m/s at 359 m", clearing both the speed and resolvability gates, leaving `ε` as the only
 check. AeroSonicDB has no labelled ground vehicles, so only the synthetic suite saw it. The two
 test sets are complementary, and neither alone is sufficient.
+
+## What the live station found that the dataset could not
+
+Within hours of running with the recalibrated constants, the deployed station produced its
+first two blind detections. One of them was this:
+
+    04:06:02   f0 89.09 Hz   211.8 m/s   slant 16,423 m   unmatched to ADS-B
+
+It would have been published as a **non-cooperative aircraft** — the headline product. It is
+not one. 211.8 m/s is 412 knots, and 16.4 km is twice the range this instrument itself
+considers audible. Two faults, both invisible to a dataset of labelled clips:
+
+1. **The fit was pinned at its own upper speed bound.** `fit_comb` bounds speed at 250 m/s, and
+   a parameter resting on a bound is where the search stopped, not a measurement. The same
+   failure shows in AeroSonicDB as accepted "propeller" detections at exactly 250.0 m/s.
+   `plausible_aircraft` now rejects fits within 2 % of the bound.
+2. **The two halves of the join disagreed about audibility.** `audible_candidates` excluded
+   anything past 8 km from "should have been heard", while `plausible_aircraft` happily
+   accepted a detection at 16.4 km and called it unexplained — the instrument contradicting
+   itself. `physics.AUDIBILITY_RADIUS_M` is now shared by both, with a test asserting they
+   agree.
+
+No speed cap was added instead: a Piaggio Avanti cruises at 207 m/s, so any cap tight enough to
+catch a 211 m/s misfit would reject real turboprops.
+
+This is the argument for running both test sets. The synthetic suite caught the ground-source
+regression that AeroSonicDB could not see; AeroSonicDB caught the threshold and epsilon
+miscalibration the synthetics could not; and the live station caught an incoherence neither
+corpus would ever contain, because only a real deployment produces an unmatched detection with
+nothing to check it against.
