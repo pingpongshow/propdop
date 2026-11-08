@@ -104,6 +104,9 @@ class PipelineConfig:
     corpus_limit_bytes: int = 750_000_000
     dedup_window_s: float = 20.0
     status_path: str | None = None
+    spectrogram_path: str | None = None
+    spectrogram_window_s: float = 60.0
+    spectrogram_band: tuple[float, float] = (20.0, 400.0)
     heartbeat_s: float = 30.0
     first_analysis_s: float = 120.0
     analyse_in_process: bool = False
@@ -215,7 +218,65 @@ class Pipeline:
     def _status_loop(self) -> None:
         while not self._stop.is_set():
             self._write_status()
+            self._write_spectrogram()
             self._stop.wait(self.cfg.heartbeat_s)
+
+    def _write_spectrogram(self) -> None:
+        """Publish a small spectrogram of the recent past, for the dashboard to draw.
+
+        The web UI is a separate process and cannot read the capture rings: ALSA capture is
+        exclusive, which is the same reason analysis had to move out of process. So this
+        crosses the boundary exactly as the status does -- a small file written here and read
+        there -- rather than by having the UI open the microphone, which would fail, or by
+        storing audio in the database, which would be wasteful.
+
+        Deliberately not `fit.whitened_spectrogram`: that one's per-bin median over a 420 s
+        window is the expensive part of an analysis, and this runs every heartbeat. A plain
+        STFT plus a per-frequency median subtraction over a 60 s window costs milliseconds and
+        is what a human needs to see a tone standing out of coloured noise.
+        """
+        if not self.cfg.spectrogram_path:
+            return
+        try:
+            rate = int(self.node.archive_ring.sample_rate)
+            audio = self.node.archived(seconds=self.cfg.spectrogram_window_s)
+            nperseg = rate                       # 1 s frames -> 1 Hz resolution
+            if audio.size < nperseg * 2:
+                return
+            hop = nperseg // 2
+            n_frames = 1 + (audio.size - nperseg) // hop
+            window = np.hanning(nperseg)
+            lo, hi = self.cfg.spectrogram_band
+            freqs = np.fft.rfftfreq(nperseg, 1.0 / rate)
+            keep = (freqs >= lo) & (freqs <= hi)
+
+            mag = np.empty((int(keep.sum()), n_frames), dtype=np.float32)
+            for j in range(n_frames):
+                seg = audio[j * hop : j * hop + nperseg] * window
+                mag[:, j] = np.abs(np.fft.rfft(seg))[keep]
+
+            db = 20.0 * np.log10(mag + 1e-12)
+            # Per-frequency median subtraction: wind noise is strongly coloured and mains hum
+            # is constant, so both sit in the median and a transient tone stands out of it.
+            db -= np.median(db, axis=1, keepdims=True)
+
+            lo_db, hi_db = -6.0, 24.0
+            img = np.clip((db - lo_db) / (hi_db - lo_db), 0.0, 1.0)
+            img = (img * 255.0).astype(np.uint8)
+
+            hi_frame = self.node.archive_ring.available_frames[1]
+            t_end = self.node.archive_time_of(hi_frame)
+            path = Path(self.cfg.spectrogram_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp.npz")
+            np.savez(
+                tmp, img=img, freqs=freqs[keep].astype(np.float32),
+                t_end=np.float64(t_end), window_s=np.float64(n_frames * hop / rate),
+                db_lo=np.float32(lo_db), db_hi=np.float32(hi_db),
+            )
+            tmp.replace(path)     # atomic, so a reader never sees a half-written array
+        except Exception:
+            self.stats["last_error"] = traceback.format_exc(limit=3)
 
     @property
     def capture_lag_s(self) -> float:

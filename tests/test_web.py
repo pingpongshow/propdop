@@ -224,3 +224,94 @@ def test_the_candidates_panel_refreshes_with_the_other_live_regions(client):
     d = client.get("/api/live").json()
     assert "candidates" in d
     assert "verdict" in d["candidates"] or "No expected-but-unheard" in d["candidates"]
+
+
+def test_spectrogram_png_is_a_valid_png_without_an_imaging_library():
+    """Encoded with the standard library only.
+
+    The dashboard's premise is that it pulls nothing at runtime and works on a network with no
+    outbound route, so adding Pillow or matplotlib to draw one heatmap is out of proportion.
+    """
+    import struct
+    import zlib
+
+    import numpy as np
+
+    idx = np.tile(np.arange(256, dtype=np.uint8), (7, 1))
+    png = web._png_indexed(idx, web._spectrogram_palette())
+
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert png[12:16] == b"IHDR"
+    w, h, depth, ctype = struct.unpack(">IIBB", png[16:26])
+    assert (w, h, depth, ctype) == (256, 7, 8, 3)       # 8-bit indexed colour
+    assert png[-8:-4] == b"IEND"
+
+    # Header checks are cheap; decompress the pixels and compare them to the input.
+    pos, idat = 8, b""
+    while pos < len(png):
+        (ln,) = struct.unpack(">I", png[pos : pos + 4])
+        if png[pos + 4 : pos + 8] == b"IDAT":
+            idat += png[pos + 8 : pos + 8 + ln]
+        pos += 12 + ln
+    raw = zlib.decompress(idat)
+    assert len(raw) == h * (1 + w)                     # one filter byte per scanline
+    assert raw[0] == 0 and raw[1 : 1 + w] == idx[0].tobytes()
+
+
+def test_spectrogram_ramp_is_sequential_not_a_rainbow():
+    """Magnitude is a sequential encoding, so: one hue, monotonic in lightness.
+
+    A rainbow map invents category boundaries where the data has none and is not monotonic in
+    perceived lightness, so "brighter" stops meaning "louder". Asserted rather than left to
+    taste, because it is the one property that makes the panel readable at a glance.
+    """
+    import numpy as np
+
+    pal = web._spectrogram_palette()
+    assert len(pal) == 768
+    rgb = np.frombuffer(pal, dtype=np.uint8).reshape(256, 3).astype(float) / 255.0
+    lin = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    lum = lin @ np.array([0.2126, 0.7152, 0.0722])
+    assert (np.diff(lum) >= -1e-9).all(), "luminance must never decrease along the ramp"
+    assert lum[0] < 0.02 and lum[-1] > 0.80, "must span near-black to near-white"
+
+
+@pytest.fixture
+def spec_client(tmp_path):
+    """Its own app, so the 404-before-publish case cannot depend on test ordering."""
+    db = store.Store(tmp_path / "passes.sqlite")
+    db.add_station(store.Station.from_receiver(RX))
+    db.close()
+    return TestClient(web.create_app(tmp_path / "passes.sqlite")), tmp_path
+
+
+def test_spectrogram_endpoint_404s_until_capture_publishes_one(spec_client):
+    client, _ = spec_client
+    assert client.get("/spectrogram.png").status_code == 404
+    body = client.get("/").text
+    assert "No spectrogram yet" in body
+
+
+def test_spectrogram_endpoint_serves_the_published_snapshot(spec_client):
+    import numpy as np
+
+    client, tmp_path = spec_client
+    img = np.zeros((40, 25), dtype=np.uint8)
+    img[12, :] = 255
+    np.savez(
+        tmp_path / "spectrogram.npz", img=img,
+        freqs=np.linspace(20.0, 400.0, 40).astype(np.float32),
+        t_end=np.float64(1_700_000_000.0), window_s=np.float64(60.0),
+        db_lo=np.float32(-6.0), db_hi=np.float32(24.0),
+    )
+    r = client.get("/spectrogram.png")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert "no-store" in r.headers.get("cache-control", "")
+
+    body = client.get("/").text
+    assert "Live spectrogram" in body and 'id="spectrogram"' in body
+    assert "/spectrogram.png?t=1700000000" in body, "cache-buster or the panel is missing"
+    assert "50-300 Hz propeller band" in body
+    assert "spectrogram" in client.get("/api/live").json()

@@ -30,7 +30,7 @@ import numpy as np
 from . import __version__, detect, store
 
 try:  # keep the core import-light; the web extra is optional
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, Response
     from fastapi.responses import HTMLResponse
 except ModuleNotFoundError as exc:  # pragma: no cover
     raise ModuleNotFoundError(
@@ -44,7 +44,23 @@ LIVE_SCRIPT = """<script>
 // Vanilla, no framework, no CDN -- the page has to work on a network with no outbound route.
 (function () {
   var FIELDS = {radar: "radar", overhead: "overhead", capture: "capture",
-                candidates: "candidates", "radar-note": "radar_note"};
+                candidates: "candidates", spectrogram: "spectrogram",
+                "radar-note": "radar_note"};
+  // Delegated, because the spectrogram fragment is replaced on every poll.
+  document.addEventListener("mousemove", function (e) {
+    var hit = e.target;
+    if (!hit || hit.id !== "spec-hit") return;
+    var r = hit.getBoundingClientRect();
+    var flo = parseFloat(hit.getAttribute("data-flo")),
+        fhi = parseFloat(hit.getAttribute("data-fhi")),
+        win = parseFloat(hit.getAttribute("data-win"));
+    var hz = flo + (fhi - flo) * (1 - (e.clientY - r.top) / r.height);
+    var ago = win * (1 - (e.clientX - r.left) / r.width);
+    var out = document.getElementById("spec-cursor");
+    if (out) out.textContent = "\u2014 cursor: " + hz.toFixed(0) + " Hz, " +
+      ago.toFixed(0) + " s ago \u2192 " + (hz * 30).toFixed(0) + " RPM on 2 blades, " +
+      (hz * 20).toFixed(0) + " on 3";
+  });
   var dot = document.getElementById("state-dot");
   var label = document.getElementById("state-label");
   function tick() {
@@ -156,6 +172,66 @@ def _fmt(x, digits=2, dash="—") -> str:
     except (TypeError, ValueError):
         return _esc(x)
     return dash if not math.isfinite(f) else f"{f:,.{digits}f}"
+
+
+_SPECTROGRAM_RAMP = (
+    # One hue, monotonic in lightness: a spectrogram encodes magnitude, which is a sequential
+    # job, so a rainbow (jet, viridis) is the wrong tool -- it invents category boundaries
+    # where the data has none and is not monotonic in perceived lightness. These are control
+    # points of a single blue ramp on its own dark plot surface, interpolated to 256 steps.
+    (0.00, (0x0b, 0x10, 0x1a)),
+    (0.35, (0x15, 0x3e, 0x75)),
+    (0.65, (0x25, 0x63, 0xeb)),
+    (0.85, (0x7d, 0xaa, 0xf7)),
+    (1.00, (0xe8, 0xf1, 0xfe)),
+)
+
+
+def _spectrogram_palette() -> bytes:
+    """256 RGB triples for an indexed-colour PNG."""
+    stops = _SPECTROGRAM_RAMP
+    out = bytearray()
+    for i in range(256):
+        t = i / 255.0
+        for k in range(len(stops) - 1):
+            t0, c0 = stops[k]
+            t1, c1 = stops[k + 1]
+            if t <= t1 or k == len(stops) - 2:
+                f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+                f = min(max(f, 0.0), 1.0)
+                out += bytes(int(round(a + (b - a) * f)) for a, b in zip(c0, c1))
+                break
+    return bytes(out)
+
+
+def _png_indexed(idx: "np.ndarray", palette: bytes) -> bytes:
+    """Encode a 2-D uint8 array as an indexed-colour PNG, using only the standard library.
+
+    No Pillow, no matplotlib: the dashboard's whole premise is that it works on a network with
+    no outbound route and pulls nothing at runtime, and adding an imaging dependency to render
+    one heatmap would be out of proportion. Colour type 3 at 8 bits is one byte per pixel plus
+    a 768-byte palette, which compresses far smaller than the equivalent SVG rect grid -- a
+    380x119 spectrogram would otherwise be 45,000 <rect> elements.
+    """
+    import struct
+    import zlib
+
+    arr = np.ascontiguousarray(idx, dtype=np.uint8)
+    h, w = arr.shape
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 3, 0, 0, 0)
+    # Each scanline is prefixed with its filter type; 0 (None) is right for palette indices,
+    # where byte deltas carry no meaning.
+    raw = b"".join(b"\x00" + arr[r].tobytes() for r in range(h))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", ihdr)
+            + chunk(b"PLTE", palette)
+            + chunk(b"IDAT", zlib.compress(raw, 6))
+            + chunk(b"IEND", b""))
 
 
 def _score(x) -> float:
@@ -467,6 +543,103 @@ def _live_status(db_path: str) -> dict | None:
         return None
 
 
+def _spectrogram_snapshot(db_path: str) -> dict | None:
+    """Load the snapshot the capture process publishes beside the heartbeat."""
+    import os as _os
+
+    try:
+        path = _os.path.join(_os.path.dirname(str(db_path)), "spectrogram.npz")
+        with np.load(path) as z:
+            img = np.asarray(z["img"], dtype=np.uint8)
+            freqs = np.asarray(z["freqs"], dtype=float)
+            return {
+                "img": img,
+                "f_lo": float(freqs[0]),
+                "f_hi": float(freqs[-1]),
+                "t_end": float(z["t_end"]),
+                "window_s": float(z["window_s"]),
+                "db_lo": float(z["db_lo"]),
+                "db_hi": float(z["db_hi"]),
+                "age_s": max(0.0, __import__("time").time() - float(z["t_end"])),
+            }
+    except Exception:
+        return None
+
+
+def spectrogram_svg(meta: dict | None, cache_bust: str = "") -> str:
+    """Frame the published PNG with axes and a magnitude scale.
+
+    The heatmap itself is a raster served from /spectrogram.png; only the axes, the colour bar
+    and the hover readout are SVG. Drawing the cells as SVG rects would mean tens of thousands
+    of elements for one panel.
+    """
+    W, H = 720, 268
+    L, R, T, B = 48, 86, 10, 30
+    pw, ph = W - L - R, H - T - B
+    if meta is None:
+        return ('<p class="note">No spectrogram yet. The capture process publishes one every '
+                "heartbeat once it has a couple of minutes of audio.</p>")
+
+    f_lo, f_hi = meta["f_lo"], meta["f_hi"]
+    win = meta["window_s"]
+    # One hue, so the bar is just the ramp sampled as gradient stops.
+    stops = "".join(
+        f'<stop offset="{t * 100:.0f}%" stop-color="rgb({c[0]},{c[1]},{c[2]})"/>'
+        for t, c in _SPECTROGRAM_RAMP
+    )
+
+    def fy(hz):      # frequency bins are linear in Hz, and low frequency sits at the bottom
+        return T + ph * (1.0 - (hz - f_lo) / max(f_hi - f_lo, 1e-9))
+
+    yticks = [h for h in (25, 50, 100, 150, 200, 300, 400) if f_lo <= h <= f_hi]
+    ylab = "".join(
+        f'<line x1="{L - 4}" y1="{fy(h):.1f}" x2="{L}" y2="{fy(h):.1f}" class="ax"/>'
+        f'<text x="{L - 7}" y="{fy(h) + 3.5:.1f}" class="tk" text-anchor="end">{h}</text>'
+        for h in yticks
+    )
+    xstep = 15 if win <= 90 else 30
+    xs = [t for t in range(0, int(win) + 1, xstep)]
+    xlab = "".join(
+        f'<line x1="{L + pw * (1 - t / win):.1f}" y1="{T + ph}" '
+        f'x2="{L + pw * (1 - t / win):.1f}" y2="{T + ph + 4}" class="ax"/>'
+        f'<text x="{L + pw * (1 - t / win):.1f}" y="{T + ph + 16}" class="tk" '
+        f'text-anchor="middle">{"now" if t == 0 else f"-{t}"}</text>'
+        for t in xs
+    )
+    # The propeller band, so the eye knows where to look.
+    band_y0, band_y1 = fy(300.0), fy(50.0)
+    return f"""<svg viewBox="0 0 {W} {H}" width="100%" role="img" id="spec-svg"
+     aria-label="live spectrogram of the last {win:.0f} seconds, {f_lo:.0f} to {f_hi:.0f} Hz">
+  <defs><linearGradient id="specramp" x1="0" y1="1" x2="0" y2="0">{stops}</linearGradient></defs>
+  <style>
+    #spec-svg .ax {{ stroke: var(--line); stroke-width: 1; }}
+    #spec-svg .tk {{ fill: var(--mut); font: 10px ui-monospace, monospace; }}
+    #spec-svg .cap {{ fill: var(--mut); font: 10px ui-sans-serif, system-ui; }}
+    #spec-svg .bandmark {{ stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3;
+                           fill: none; opacity: .55; }}
+  </style>
+  <image x="{L}" y="{T}" width="{pw}" height="{ph}" preserveAspectRatio="none"
+         href="/spectrogram.png{cache_bust}"/>
+  <rect x="{L}" y="{T}" width="{pw}" height="{ph}" fill="none" stroke="var(--line)"/>
+  <rect x="{L}" y="{band_y0:.1f}" width="{pw}" height="{band_y1 - band_y0:.1f}" class="bandmark"/>
+  <text x="{L + 5}" y="{band_y0 - 4:.1f}" class="cap" fill="var(--warn)">50-300 Hz propeller band</text>
+  {ylab}{xlab}
+  <text x="12" y="{T + ph / 2:.1f}" class="cap" text-anchor="middle"
+        transform="rotate(-90 12 {T + ph / 2:.1f})">frequency (Hz)</text>
+  <text x="{L + pw / 2:.1f}" y="{H - 2}" class="cap" text-anchor="middle">seconds ago</text>
+  <rect x="{W - R + 16}" y="{T}" width="12" height="{ph}" fill="url(#specramp)"
+        stroke="var(--line)"/>
+  <text x="{W - R + 33}" y="{T + 8}" class="tk">+{meta["db_hi"]:.0f}</text>
+  <text x="{W - R + 33}" y="{T + ph}" class="tk">{meta["db_lo"]:.0f}</text>
+  <text x="{W - R + 33}" y="{T + ph + 14}" class="cap">dB over median</text>
+  <rect id="spec-hit" x="{L}" y="{T}" width="{pw}" height="{ph}" fill="transparent"
+        data-flo="{f_lo}" data-fhi="{f_hi}" data-win="{win}"/>
+</svg>
+<p class="note" id="spec-readout">Brighter is louder than this minute's median at that
+frequency, so steady wind and mains hum sit near zero and a passing tone stands out as a
+sweeping curve. Updated {meta["age_s"]:.0f} s ago. <span id="spec-cursor" class="mono"></span></p>"""
+
+
 def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
     app = FastAPI(title="PropDop", version=__version__, docs_url="/api/docs")
     db_path = str(db_path)
@@ -667,8 +840,14 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             else "No heard passes yet, so there is no measured envelope. Live traffic is "
             "shown; the lobe fills in as passes are detected."
         )
+        spec = _spectrogram_snapshot(db_path)
         return {
             "radar": radar_svg(envelope, overhead, recent),
+            # The cache-buster is what makes the <image> refetch; without it the browser
+            # serves the first PNG forever and the panel looks frozen.
+            "spectrogram": spectrogram_svg(
+                spec, f"?t={int(spec['t_end'])}" if spec else ""
+            ),
             "overhead": over,
             "candidates": cand,
             "capture": cap,
@@ -677,6 +856,20 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             "n_overhead": len(overhead),
             "listening": bool(live and live.get("listening")),
         }
+
+    @app.get("/spectrogram.png")
+    def spectrogram_png():
+        """The heatmap itself. Served as a raster, encoded with the standard library only."""
+        meta = _spectrogram_snapshot(db_path)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="no spectrogram published yet")
+        # Row 0 of a PNG is the top row, and low frequency belongs at the bottom.
+        png = _png_indexed(meta["img"][::-1], _spectrogram_palette())
+        return Response(
+            content=png,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     @app.get("/api/live")
     def api_live():
@@ -787,6 +980,8 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
     <div id="overhead">{frag["overhead"]}</div>
   </div>
 </div>
+<h2>Live spectrogram</h2>
+<div id="spectrogram">{frag["spectrogram"]}</div>
 <h2>Instrument health</h2>
 {line_svg([t["bucket_start"] / 86400.0 for t in trend],
           [100 * t["mean_epsilon"] for t in trend],

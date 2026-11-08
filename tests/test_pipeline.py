@@ -300,3 +300,67 @@ def test_max_detections_reaches_the_detector(tmp_path, monkeypatch):
         assert seen["max_detections"] == 6
     finally:
         p.stop()
+
+
+def test_spectrogram_snapshot_shows_a_transient_tone_and_suppresses_steady_hum(tmp_path):
+    """The panel has to make a pass visible without making hum visible.
+
+    Per-frequency median subtraction is what buys that: mains hum and wind are present for the
+    whole window so they sit in the median and cancel, while a tone that is only there for part
+    of it stands out. On the deployed station 60 Hz was the strongest thing below 500 Hz even
+    outdoors, so without this the panel would just be a bright line at 60 Hz.
+    """
+    rate, total = 8000, 120.0
+    t = np.arange(int(total * rate)) / rate
+    rng = np.random.default_rng(3)
+    sig = 0.02 * rng.standard_normal(t.size)
+    sig += 0.05 * np.sin(2 * np.pi * 60.0 * t)              # hum, present throughout
+    burst = (t >= 90.0) & (t < 105.0)
+    sig[burst] += 0.05 * np.sin(2 * np.pi * 110.0 * t[burst])   # a pass, transient
+
+    out = tmp_path / "spectrogram.npz"
+    cfg = make_config(tmp_path, sample_rate=rate, archive_rate=rate,
+                      spectrogram_path=str(out), spectrogram_window_s=60.0)
+    p = pipeline.Pipeline(cfg, source=node.SyntheticSource(sig, nominal_rate=rate))
+    try:
+        p.node.clock.t0 = 0.0
+        p.node.pump(blocks=int(total))
+        p._write_spectrogram()
+        assert p.stats["last_error"] is None, p.stats["last_error"]
+        assert out.exists()
+
+        with np.load(out) as z:
+            img = z["img"]
+            freqs = z["freqs"]
+            assert z["window_s"] > 0
+        assert img.dtype == np.uint8
+        assert img.shape == (freqs.size, img.shape[1])
+        assert 20.0 <= freqs[0] <= 21.0 and 399.0 <= freqs[-1] <= 400.0
+
+        def row(hz):
+            return img[int(np.argmin(np.abs(freqs - hz)))]
+
+        # The transient tone is the brightest thing in the panel, at the right frequency.
+        brightest = freqs[int(np.argmax(img.max(axis=1)))]
+        assert abs(brightest - 110.0) <= 2.0, f"peak landed at {brightest:.1f} Hz"
+        # ...and the steady hum, though far louder in absolute terms, is cancelled.
+        assert row(110.0).max() > row(60.0).max() + 40, (
+            f"hum not suppressed: 110 Hz peak {row(110.0).max()}, "
+            f"60 Hz peak {row(60.0).max()}"
+        )
+    finally:
+        p.stop()
+
+
+def test_spectrogram_is_skipped_when_unconfigured_and_never_fatal(tmp_path):
+    """One bad snapshot must not end a run that is otherwise capturing fine."""
+    cfg = make_config(tmp_path, spectrogram_path=None)
+    p = pipeline.Pipeline(cfg, source=node.SyntheticSource(np.zeros(8000), nominal_rate=8000))
+    try:
+        p._write_spectrogram()                       # no path: a no-op, not an error
+        assert p.stats["last_error"] is None
+        p.cfg.spectrogram_path = str(tmp_path / "nope" / "s.npz")
+        p._write_spectrogram()                       # too little audio: still not an error
+        assert p.stats["last_error"] is None
+    finally:
+        p.stop()

@@ -173,6 +173,7 @@ def cmd_run(args) -> int:
         max_detections=args.max_detections,
         corpus_dir=args.corpus or str(data_path("corpus", ".keep").parent),
         status_path=str(data_path("db", "pipeline_status.json")),
+        spectrogram_path=str(data_path("db", "spectrogram.npz")),
     )
     print(
         json.dumps(
