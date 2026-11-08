@@ -141,12 +141,36 @@ def test_detection_threshold_sits_between_null_and_signal():
     assert best_signal > 3.0 * worst_null  # a real gap, not a hairline
 
 
-def test_score_verdict_separates_silence_from_a_near_miss():
-    mid = 0.5 * (detect.NOISE_CEILING_SCORE + detect.MIN_TEMPLATE_SCORE)
+def test_score_verdict_separates_silence_from_background_from_a_near_miss():
+    """Four bands, because the two noise ceilings differ by a factor of two.
+
+    Real background reaches FIELD_NOISE_CEILING, roughly twice the synthetic pink-noise
+    figure the threshold was calibrated against (VALIDATION.md). A score between them is not
+    evidence of a tone, and the old three-band version called it "below threshold", which
+    implied it nearly was one.
+    """
+    assert detect.PINK_NOISE_CEILING < detect.FIELD_NOISE_CEILING
     assert detect.score_verdict(float("nan")) == "not analysed"
-    assert detect.score_verdict(detect.NOISE_CEILING_SCORE - 1.0) == "nothing tonal"
-    assert detect.score_verdict(mid) == "below threshold"
+    assert detect.score_verdict(detect.PINK_NOISE_CEILING - 1.0) == "nothing tonal"
+
+    between = 0.5 * (detect.PINK_NOISE_CEILING + detect.FIELD_NOISE_CEILING)
+    assert detect.score_verdict(between) == "within background"
+
+    near = 0.5 * (detect.FIELD_NOISE_CEILING + detect.MIN_TEMPLATE_SCORE)
+    if detect.FIELD_NOISE_CEILING < detect.MIN_TEMPLATE_SCORE:
+        assert detect.score_verdict(near) == "below threshold"
     assert detect.score_verdict(detect.MIN_TEMPLATE_SCORE + 1.0) == "scored, screened out"
+
+
+def test_field_noise_ceiling_is_above_the_synthetic_one():
+    """Guards the lesson, not just the value.
+
+    MIN_TEMPLATE_SCORE was set from pink noise peaking at 8.9; measurement on 274 verified
+    aircraft-free windows of real airport audio put the ceiling at 17.8. Any future
+    recalibration that drops the field figure back to the synthetic one is a regression.
+    """
+    assert detect.FIELD_NOISE_CEILING >= 15.0
+    assert detect.NOISE_CEILING_SCORE == detect.PINK_NOISE_CEILING
 
 
 def test_diagnostics_are_optional_and_cost_nothing_when_unused():

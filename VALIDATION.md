@@ -40,15 +40,23 @@ applies thresholds afterwards.
 
 ## Results
 
-2,135 clips scored at the deployed configuration (8 kHz, 50–300 Hz, four harmonics,
-`max_detections=8`), zero errors.
+2,135 clips scored (8 kHz, 50–300 Hz, four harmonics, `max_detections=8`), zero errors. The
+measurement was run twice: once at the original constants, then again after they were
+recalibrated against it.
 
-| group | n | at threshold 20 + `plausible_aircraft` |
-|---|---|---|
-| propeller | 151 | **61.6 % detected** |
-| no-aircraft, 51 s label-verified | 274 | **0.0 % false positive** |
-| no-aircraft, 10 s curated | 1,236 | 0.0 % false positive |
-| turbofan | 474 | 0.0 % fired |
+| group | n | before `20 / ε 0.02` | after `18 / ε 0.03` |
+|---|---|---|---|
+| propeller | 151 | 61.6 % | **68.9 %** |
+| — turboprop | 114 | 72.8 % | **81.6 %** |
+| — piston | 37 | 27.0 % | 29.7 % |
+| no-aircraft, 51 s label-verified | 274 | **0** | **0** |
+| no-aircraft, 10 s curated | 1,236 | 0 | 0 |
+| turbofan fired on | 474 | 0 | 2 |
+
+The two turbofans are the cost of the lower threshold: jet peak scores reach 20.8, so at 18 a
+couple fit a comb to broadband noise. They are not false positives in the "unexplained
+detection" sense — they join to their own ADS-B track — but any RPM reported for them is
+meaningless. ADS-B engine type is the natural downstream filter.
 
 Jets firing on nothing is correct rather than a miss: a turbofan is broadband, and this
 detector is a harmonic-comb matched filter for propellers.
@@ -70,25 +78,41 @@ the ~11 points the pink-noise calibration implied.
 | 20 *(deployed)* | 61.6 % | 0.0 % | 68.9 % | 0.0 % |
 | 30 | 32.5 % | 0.0 % | 35.8 % | 0.0 % |
 
-**The deployed threshold is too conservative.** Dropping it to 15 gains 7.9 points of detection
-rate with no false positive in 274 label-verified windows. Two cautions before treating that as
-free: 0/274 bounds the true rate only to about 1.1 % at 95 % confidence, and at 15 the
-unscreened rate is 1.5 %, so `plausible_aircraft` is carrying more of the load. Below 12 that
-load grows fast (5.5 %, then 22.3 %), which is a fragile place to operate.
+**The threshold was changed to 18**, set just above the measured field ceiling — which is the
+principle the original value only appeared to follow. Lower values detect more (74.2 % at 15),
+but 15 is *below* the ceiling, so around 1.5 % of clean windows produce a candidate and
+`plausible_aircraft` becomes the only thing rejecting them. For a station whose headline
+product is "heard but absent from ADS-B", screening should be defence in depth rather than the
+load-bearing member. Below 12 that load grows fast (5.5 %, then 22.3 %).
 
-### Piston aircraft are the real weakness
+Note 0/274 bounds the true false-positive rate only to about 1.1 % at 95 % confidence. A
+noisier site should measure its own ceiling and raise the threshold accordingly.
 
-| engine | clips | detected |
-|---|---|---|
-| Turboprop | 114 | 83 = **72.8 %** |
-| Piston | 37 | 10 = **27.0 %** |
+### Piston aircraft are the real weakness, and it is not fixable by tuning
 
 This is the most consequential finding for a backyard station, where light piston singles and
-twins are most of the traffic. Clip length does not explain it (detection is flat at ~62 % for
-every duration bucket) and neither does altitude: detected passes have a median 3,275 ft and
-missed ones 3,138 ft. Every one of the 151 propeller clips produced *some* candidate above 4.0,
-so nothing was missed for being inaudible — the misses are fit quality and screening, and the
-rejection reasons are dominated by `poor fit (epsilon 2.5–4.5 %)`.
+twins are most of the traffic — not regional turboprops.
+
+**A hypothesis recorded because it was wrong.** The rejection reasons were dominated by
+`poor fit (epsilon 2.5–4.5 %)`, so the obvious read was that the epsilon gate was throwing real
+piston aircraft away. Loosening it moved pistons by 2.7 points (27.0 → 29.7 %) while moving
+turboprops by 8.8 (72.8 → 81.6 %). The gate was indeed too tight — but for turboprops.
+
+What the measurement actually shows:
+
+| engine | peak score p50 | p90 | misses that never reached the threshold at all |
+|---|---|---|---|
+| Turboprop | 28.3 | 36.3 | 16 / 21 (76 %) |
+| Piston | **15.3** | 31.0 | **25 / 26 (96 %)** |
+
+**Piston aircraft are signal-limited, not gate-limited.** Their median peak score of 15.3 sits
+*below* the 17.8 field-noise ceiling: the comb is not above background in the first place. No
+threshold or gate can recover them without also accepting background, so this bounds what the
+instrument can do on light aircraft rather than describing something to tune. Altitude does not
+explain it either (piston median 2,950 ft against turboprop 3,275 ft).
+
+Among the minority of misses that *did* clear the threshold, the remaining rejection is
+`transition unresolvable` (5 turboprop, 1 piston) — passes too close and fast to resolve.
 
 ### Epsilon is worse than the synthetics suggested
 
@@ -138,3 +162,22 @@ threshold sweep is reported at nine values rather than at whichever one wins.
 
 They are not committed, because they depend on a dataset layout this project does not control.
 `scripts/` in a future revision is the right home if this becomes routine.
+
+
+## What changed as a result
+
+| constant | was | now | why |
+|---|---|---|---|
+| `detect.MIN_TEMPLATE_SCORE` | 20.0 | **18.0** | 20 came from pink noise; set just above the measured field ceiling of 17.8 |
+| `fit.MAX_EPSILON` | 0.02 | **0.03** | 0.02 came from synthetic `ε`; 0.03 is set just under the 3.91 % of a misfitting car |
+| `detect.FIELD_NOISE_CEILING` | *(did not exist)* | **17.8** | real background reaches twice the synthetic figure |
+| `score_verdict` | 3 bands | **4 bands** | a score between the two ceilings is not evidence of a tone |
+
+`plausible_aircraft` also now resolves its thresholds at call time rather than binding them as
+default arguments, so a site can recalibrate once on the module and have `detect` pick it up.
+
+**A regression the dataset could not have caught.** Loosening `MAX_EPSILON` to 0.045 — which the
+aircraft sweep said was free — broke ground-source rejection: a car at 30 m/s and 120 m misfits
+as "48 m/s at 359 m", clearing both the speed and resolvability gates, leaving `ε` as the only
+check. AeroSonicDB has no labelled ground vehicles, so only the synthetic suite saw it. The two
+test sets are complementary, and neither alone is sufficient.

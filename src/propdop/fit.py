@@ -737,21 +737,54 @@ def fit_comb(
 MIN_AIRCRAFT_SPEED = 35.8  # m/s, 80 mph
 MIN_TRANSITION_S = 5.0
 MIN_COMB_CONTRAST = 0.35
-MAX_EPSILON = 0.02
+# CORRECTED against real audio (VALIDATION.md). Epsilon measures *precision*, not
+# aircraft-ness: a noisy fit of a real aeroplane is still a real aeroplane, and gating
+# detection on it conflated "is this an aircraft?" with "is this measurement good enough to do
+# physics with?".
+#
+# 0.02 came from synthetic fits, where epsilon runs 0.014-1.4 %. On real recordings the median
+# is 1.22 %, so the gate sat barely above the typical value and was rejecting genuine aircraft
+# -- the single biggest reason piston aircraft were detected at only 27 %, against 72.8 % for
+# turboprops.
+#
+# But epsilon is not purely a precision measure, and loosening it to 0.045 broke ground-source
+# rejection: a car at 30 m/s and 120 m misfits as "48 m/s at 359 m", which clears both the
+# speed gate and the resolvability gate, so epsilon is the only thing that rejects it. A
+# wrong-model source fits badly, and that bad fit is evidence of not-an-aircraft. The suite
+# caught this; the sweep alone would not have.
+#
+# Measured ceiling for that car: 3.91 %. Real aircraft worth recovering sit at 2.5-4.5 %, so
+# the two genuinely overlap and no threshold separates them cleanly. 0.03 is set just under
+# the car, and costs nothing: at the deployed threshold it detects 68.9 % of propeller
+# aircraft, identical to 0.045, with zero false positives in 274 verified windows.
+#
+# Safe for the physics either way, because the atmospheric inversion is already
+# inverse-variance weighted: `atmos.sample_from_match` sets sigma from epsilon and weights by
+# 1/sigma^2, so a pass at 3 % contributes about a sixth of one at 1.2 % rather than polluting
+# it. The remaining cost is detections above 3 %, which stay lost.
+MAX_EPSILON = 0.03
 
 
 def plausible_aircraft(
     result: CombFit,
-    min_speed: float = MIN_AIRCRAFT_SPEED,
-    min_transition_s: float = MIN_TRANSITION_S,
-    min_comb_contrast: float = MIN_COMB_CONTRAST,
-    max_epsilon: float = MAX_EPSILON,
+    min_speed: float | None = None,
+    min_transition_s: float | None = None,
+    min_comb_contrast: float | None = None,
+    max_epsilon: float | None = None,
 ) -> tuple[bool, str]:
     """Whether a blind detection is plausibly an aircraft. Returns (verdict, reason).
 
     For the ADS-B-triggered path this is only a sanity check; for the blind path it is the
     product. See the note above for why each threshold is what it is.
+
+    Thresholds resolve to the module constants at call time rather than being bound as default
+    arguments, so a deployment or a calibration run can set them once on the module and have
+    every caller -- including `detect`, which does not forward them -- pick the new value up.
     """
+    min_speed = MIN_AIRCRAFT_SPEED if min_speed is None else min_speed
+    min_transition_s = MIN_TRANSITION_S if min_transition_s is None else min_transition_s
+    min_comb_contrast = MIN_COMB_CONTRAST if min_comb_contrast is None else min_comb_contrast
+    max_epsilon = MAX_EPSILON if max_epsilon is None else max_epsilon
     comb = float(result.notes.get("comb_score", 0.0))
     if not result.converged:
         return False, "fit did not converge"

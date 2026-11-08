@@ -241,3 +241,28 @@ def test_rejects_ground_sources(label, kw, is_aircraft):
     r = fit.fit_comb(samples, fo.sample_rate, band=(60.0, 300.0), n_harmonics=3)
     verdict, reason = fit.plausible_aircraft(r)
     assert verdict == is_aircraft, f"{label}: {reason}"
+
+
+def test_max_epsilon_stays_below_the_misfit_ground_source():
+    """The epsilon gate is load-bearing for ground rejection, not only for precision.
+
+    A car at 30 m/s and 120 m misfits as "48 m/s at 359 m", which clears both the speed gate
+    and the resolvability gate, so epsilon is the only check standing between it and a
+    reported flyover. Loosening the gate to 0.045 to recover piston aircraft broke exactly
+    this, and no sweep over an aircraft dataset could have revealed it -- AeroSonicDB has no
+    labelled ground vehicles.
+
+    Asserted as a relationship rather than a number, so a future recalibration has to confront
+    the constraint instead of silently stepping over it.
+    """
+    fo = synth.Flyover(seed=3, snr_db=20, duration=90.0,
+                       speed=30, cpa_distance=120, f0=120.0)
+    samples, _ = synth.render(fo)
+    r = fit.fit_comb(samples, fo.sample_rate, band=(60.0, 300.0), n_harmonics=3)
+
+    assert r.speed > fit.MIN_AIRCRAFT_SPEED, "must not be rescued by the speed gate"
+    assert r.cpa_distance / r.speed > fit.MIN_TRANSITION_S, "nor by resolvability"
+    assert fit.MAX_EPSILON < r.epsilon, (
+        f"MAX_EPSILON {fit.MAX_EPSILON} must stay below this misfit's "
+        f"epsilon {r.epsilon:.4f}, or a car is reported as an aircraft"
+    )

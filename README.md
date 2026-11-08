@@ -42,20 +42,21 @@ settings:
 
 | | |
 |---|---|
-| Propeller aircraft detected | **61.6 %** (turboprop 72.8 %, **piston 27.0 %**) |
+| Propeller aircraft detected | **68.9 %** (turboprop 81.6 %, **piston 29.7 %**) |
 | False positives, 274 length-matched label-verified windows | **0** |
-| Turbofans fired on | 0 of 474 *(correct — jets are broadband, not comb-tonal)* |
+| Turbofans fired on | 2 of 474 *(mostly correct — jets are broadband, not comb-tonal)* |
 | Saab 340 blade-pass, 21 passes | **91.4 Hz measured vs 92.3 Hz theoretical** |
 
 Four things that validation changed, which no synthetic test could have told us:
 
 - **`ε` is ~2.4× worse on real audio** than the synthetic median, and pass counts scale as
   `ε²`, so precision figures below are **optimistic by roughly 6×** in required passes.
-- **Piston aircraft are the weak case at 27 %** — and they are most of what a backyard
-  station hears.
+- **Piston aircraft are the weak case at ~30 %**, and the measurement says that is a limit
+  rather than a setting: their median peak score sits *below* the real-background ceiling, so
+  the comb is not above the noise. They are most of what a backyard station hears.
 - **The detection threshold was calibrated against the wrong noise.** Pink noise peaks at 8.9;
-  real background reaches 17.8. The deployed value of 20 survives, with far less margin than
-  believed, and is measurably too conservative.
+  real background reaches 17.8. The threshold is now **18** and the `ε` gate **0.03**, both set
+  from measurement, which is what moved detection from 61.6 % to 68.9 %.
 - **Ground-source rejection is still untested on real audio** — nothing false-positived, so
   nothing exercised it.
 

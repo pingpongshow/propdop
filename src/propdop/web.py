@@ -819,9 +819,12 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
                 )
                 + "</table>"
                 + '<p class="note">Reported above '
-                + f"{detect.MIN_TEMPLATE_SCORE:.0f}; pure wind noise peaks at "
-                + f"{detect.NOISE_CEILING_SCORE:.1f}. Below that the tone never reached the "
-                + "microphone at all, and the siting is the limit rather than the threshold. "
+                + f"{detect.MIN_TEMPLATE_SCORE:.0f}. Synthetic pink noise peaks at "
+                + f"{detect.PINK_NOISE_CEILING:.1f}, but <em>real</em> background reaches "
+                + f"{detect.FIELD_NOISE_CEILING:.1f} (measured over 274 verified "
+                + "aircraft-free windows), so a score between the two is not evidence of a "
+                + "tone. Below the lower figure the tone never reached the microphone at all, "
+                + "and the siting is the limit rather than the threshold. "
                 + "Blank scores are rows stored before scoring was recorded.</p>"
             )
         else:

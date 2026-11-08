@@ -47,12 +47,38 @@ from . import physics
 # The first version of this used 4.0, which is *below* the noise median -- it manufactured a
 # "73.9 m/s aircraft at 422 m" out of 240 s of wind noise. Any threshold here must be set from
 # a null, not chosen by eye.
-MIN_TEMPLATE_SCORE = 20.0
+#
+# CORRECTED against real audio (VALIDATION.md). The null above is synthetic, and synthetic
+# noise is too quiet: real aircraft-free background peaks at 17.8, not 8.9. The old value of
+# 20 was therefore not "near the geometric centre of a factor of 8 gap" -- it sat 2.2 above
+# the real ceiling, and its apparent margin was an artefact of calibrating against pink noise.
+#
+# 18.0 is set just above the measured field ceiling, which is the principle the original value
+# only appeared to follow. Measured on AeroSonicDB: 68.9 % of propeller aircraft detected
+# against 61.6 % at 20, with zero false positives in 274 verified aircraft-free windows.
+#
+# Lower values detect more -- 74.8 % at 15 -- but 15 is *below* the field ceiling, so roughly
+# 1.5 % of clean windows then produce a candidate and `plausible_aircraft` becomes the only
+# thing rejecting them. For a station whose headline product is "heard but absent from ADS-B",
+# screening should be defence in depth, not the load-bearing member. A noisier site should
+# measure its own ceiling and raise this.
+MIN_TEMPLATE_SCORE = 18.0
 
-# Measured ceiling of the pure-noise distribution (same 6 x 200 s pink-noise runs). A score
-# under this is indistinguishable from wind; it is what lets a *negative* be read as "nothing
-# tonal was there" rather than merely "we found nothing".
-NOISE_CEILING_SCORE = 8.9
+# Two noise ceilings, because they differ by a factor of two and conflating them was an error.
+#
+# PINK_NOISE_CEILING is what 6 x 200 s of synthetic pink noise reaches. It is what
+# MIN_TEMPLATE_SCORE was originally calibrated against, and it is optimistic.
+#
+# FIELD_NOISE_CEILING is what *real* background reaches: the maximum over 274 non-overlapping
+# 51 s windows of airport environment audio, each verified aircraft-free frame by frame
+# (VALIDATION.md). Real background peaks twice as high as synthetic noise, so a score of 14 --
+# comfortably "tonal" against pink noise -- is unremarkable in the field.
+PINK_NOISE_CEILING = 8.9
+FIELD_NOISE_CEILING = 17.8
+
+# Kept as the conservative floor for "nothing was there at all", and as the name the rest of
+# the package already uses.
+NOISE_CEILING_SCORE = PINK_NOISE_CEILING
 
 
 @dataclass
@@ -349,11 +375,18 @@ def best_score_near(
 
 
 def score_verdict(score: float, min_score: float = MIN_TEMPLATE_SCORE) -> str:
-    """Plain words for a template score, so a negative result reads without the context."""
+    """Plain words for a template score, so a negative result reads without the context.
+
+    Four bands rather than three, because real background reaches twice as high as the
+    synthetic noise the threshold was set against: a score between the two ceilings is not
+    evidence of a tone, and calling it "below threshold" implied it nearly was one.
+    """
     if not np.isfinite(score):
         return "not analysed"
-    if score < NOISE_CEILING_SCORE:
+    if score < PINK_NOISE_CEILING:
         return "nothing tonal"
+    if score < FIELD_NOISE_CEILING:
+        return "within background"
     if score < min_score:
         return "below threshold"
     return "scored, screened out"
