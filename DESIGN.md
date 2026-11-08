@@ -481,6 +481,33 @@ Clock accuracy is *not* on this list: `node.ClockModel` measures the sound card'
 the capture timeline (the deployed card reads 3,687 ppm fast, fitted to a 1.2 ms residual over
 180 s), and §4.1 recovers the absolute offset from ADS-B. A board with no RTC is fine.
 
+### 6.2 The capture chain ships wrong
+
+Two settings on a USB sound card silently destroy the measurement, and both were wrong out of
+the box on a C-Media/PCM2902-class dongle:
+
+* **Auto Gain Control was enabled.** It is the single worst setting for this instrument. Every
+  amplitude product is computed from how the tone's level varies: the turbulence estimate *is*
+  the log-amplitude variance (SCINTILLATION.md), and prop health reads the per-harmonic
+  amplitude tracks. AGC varies the gain on its own, so those numbers come out plausible and
+  meaningless. It must be off, and the service asserts that on every start.
+* **Capture gain was at 0 of 16.** Ambient came in at -69.2 dBFS RMS, roughly five of sixteen
+  bits. At 16/16 (+23.81 dB) the same ambient reads -49.0 dBFS RMS with peaks 40 dB below full
+  scale and no clipping -- **20 dB of signal-to-noise recovered for nothing**, which is margin
+  that decides whether a tone clears the detection threshold.
+
+Mixer state does not survive a reboot without root, so the gain and the AGC switch are
+reasserted by `ExecStartPre` on the unit rather than stored with `alsactl`.
+
+Address the card by **name, not index**. USB enumeration can renumber cards across reboots, so
+`plughw:3,0` is a device that may not be the microphone next time; `plughw:Device,0` (the card id
+from `/proc/asound/cards`) always is.
+
+Measure the chain before trusting it. 60 Hz mains and its harmonics were the strongest tones
+below 500 Hz even with the microphone outdoors, only 3.4 dB below the whole 50-300 Hz propeller
+band -- so hum sits inside the band of interest and the detector's comb rejection (3.1a) is
+load-bearing, not a nicety.
+
 A Pi used as a **remote microphone node only** — capture, decimate, ship — is trivially within
 reach at 0.09 % of real time, with no analysis on the board at all. That is the NETWORK.md
 topology, and it is the use a Pi is unambiguously suited to.
