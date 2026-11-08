@@ -168,6 +168,7 @@ def cmd_run(args) -> int:
         n_harmonics=args.harmonics,
         analysis_period_s=args.period,
         analysis_window_s=args.window,
+        max_detections=args.max_detections,
         corpus_dir=args.corpus or str(data_path("corpus", ".keep").parent),
         status_path=str(data_path("db", "pipeline_status.json")),
     )
@@ -180,6 +181,7 @@ def cmd_run(args) -> int:
                 "rate": cfg.sample_rate,
                 "db": cfg.db_path,
                 "analysis_every_s": cfg.analysis_period_s,
+                "max_detections": cfg.max_detections,
                 "adsb": "adsb.lol live (query centre rounded)",
             },
             indent=2,
@@ -268,6 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rate", type=int, default=48000)
     sp.add_argument("--period", type=float, default=300.0, help="seconds between analyses")
     sp.add_argument("--window", type=float, default=420.0, help="analysis window seconds")
+    sp.add_argument(
+        "--max-detections", type=int, default=24,
+        help="candidates refined per window. Refinement costs ~14 s each on a Pi 4, so this"
+             " is the knob that bounds a slow board's worst case (DESIGN.md 6.1).",
+    )
     sp.add_argument("--corpus", default=None)
     band(sp)
     sp.set_defaults(func=cmd_run)

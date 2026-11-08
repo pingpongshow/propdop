@@ -417,18 +417,44 @@ rather than with time. And **capture is free**: 0.09 % of real time means the ca
 never the problem, which is why the GIL contention of §3.4 was fixed by moving analysis to a
 subprocess rather than by making it cheaper.
 
-Scaled by published single-core Geekbench 6 figures (M2 Max ≈ 2759; Pi 5 ≈ 764–774; Pi 4 ≈ 340),
-widened to allow for the Pi's far weaker memory bandwidth on the FFT stages:
+**The Pi 4 figures below were scaled, and then measured. The scaling was pessimistic by about
+1.5×.** Geekbench 6 single-core ratios (M2 Max ≈ 2759; Pi 4 ≈ 340) predicted ×8–11; the board
+actually runs this workload at **×6.4** against one i7-13700K core, consistently across both the
+FFT-bound correlation and the Python-bound refinement. Recorded here rather than edited away,
+because the lesson is that Geekbench over-predicts the penalty for numpy/scipy work of this shape.
 
-| Board | Quiet sky | Busy sky | Saturated (24 candidates) |
+Measured on a Raspberry Pi 4 Model B Rev 1.4 (4 GB, Debian 13, Python 3.13.5 aarch64,
+numpy 2.5.4 / scipy 1.18.1), on the same 420 s window at the 8 kHz archive rate:
+
+| Stage | i7-13700K, 1 core | Pi 4, 1 core | ratio |
 |---|---|---|---|
-| Pi 5 (×3.6–6) | 60–101 s → **17–25 % of a core** | 99–166 s → 25–36 % | 216–360 s → 42–55 % |
-| Pi 4 (×8–11) | 136–185 s → **31–38 %** | 224–304 s → 43–50 % | 486–660 s → 62–69 % |
+| Template correlation (every window pays this) | 0.91 s | **5.83 s** | ×6.4 |
+| Refinement, per candidate | 2.26 s | **14.35 s** | ×6.3 |
+| Whole window, 5 candidates | 12.20 s | **77.58 s** | ×6.4 |
+| Duty cycle at a 300 s period | 4.1 % | **25.9 % of one core** | |
 
-**Peak CPU never exceeds ~69 % of one core even on a Pi 4, and both boards are quad-core**, with
-analysis already in its own process. Nothing in the package touches CUDA, so moving off a GPU
-machine costs no capability, and `python:3.13-slim` is multi-arch with aarch64 wheels for
-numpy/scipy, so the container needs no change.
+| Pi 4 worst case | Cost | Outcome |
+|---|---|---|
+| `max_detections=8` | 121 s | inside the period, comfortable |
+| `max_detections=24` (default) | 350 s | over the 300 s period, still inside the 420 s window: an overrun, but no coverage gap |
+
+So **a Pi 4 runs this at about a quarter of one core of four**, and the only configuration change
+it actually needs is `--max-detections 8`, which bounds the saturated case well inside the period.
+
+**Giving it more cores does nothing by itself.** Measured on the same board, raising the BLAS/FFT
+thread count from 1 to 4 changed the window from 77.58 s to 77.25 s — 0.4 %, i.e. nothing.
+`scipy.signal.fftconvolve` uses single-threaded pocketfft, and the refinement is GIL-bound Python
+(the Viterbi ridge, the per-bin median), so thread-level parallelism has nothing to grip. The only
+way to spend the other three cores is explicit process-level fan-out across candidates, which
+would cut the saturated case to roughly a third. That is a real option, but capping
+`max_detections` reaches the same place for free, so it is not implemented.
+Nothing in the package touches CUDA, so moving off a GPU machine costs no capability.
+
+Deployment needs no root and no system packages: numpy, scipy and fastapi all have aarch64
+wheels for cp313, and `soundfile`'s wheel bundles libsndfile, so a plain userspace venv installs
+with `--only-binary=:all:` and no compiler. `python:3.13-slim` is multi-arch if a container is
+wanted instead, but on a dedicated board a venv plus a `systemd --user` unit is lighter and
+avoids the `/dev/snd` and `group_add` handling the compose file needs.
 
 Memory is the tighter budget: 173 MB of standing ring buffers (115 MB live at 48 kHz + 58 MB
 archive at 8 kHz, both float32) + ~101 MB parent interpreter + **486 MB peak in the analysis
@@ -438,7 +464,8 @@ So the processor is not the binding constraint. These are the real ones, in orde
 
 1. **Analysis cadence, not throughput.** `analysis_period_s` is a *start-to-start* period. It was
    originally a wait *after* each run, making the true cadence `duration + period` — invisible at
-   17 s per window, but at a Pi 4's 136–304 s it pushes the cadence past the 420 s window and
+   17 s per window, but at a Pi 4's measured 78 s (and 350 s saturated) it can push the cadence
+   past the 420 s window and
    stretches of audio go unanalysed. An unanalysed stretch leaves **no row at all**, not even an
    `unheard` one, so it cannot be recovered or even noticed after the fact. The loop now subtracts
    the elapsed time and counts both overruns and coverage gaps, and the dashboard says so.
