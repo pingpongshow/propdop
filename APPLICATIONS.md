@@ -8,6 +8,12 @@ ground truth, which turns a one-off analysis tool into an instrument.
 
 ---
 
+
+> **Measured correction.** The pass counts throughout this document are derived from `ε`
+> on synthetic audio. On real recordings `ε` has a median of 1.22 % against a 0.5 %
+> synthetic median, and required passes scale as `ε²`, so **every figure here is
+> optimistic by roughly 6×**. See [VALIDATION.md](VALIDATION.md).
+
 ## 1. What the physics hands you directly
 
 From one fitted flyover curve:

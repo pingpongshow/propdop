@@ -30,17 +30,38 @@ becomes an over-determined physics measurement.
 | **Non-cooperative aircraft** | heard but absent from ADS-B | ADS-B Out is not required in US Class G below 10,000 ft |
 
 Every product reports its own **confidence and contributing-pass count**. A product with too
-little data says so rather than showing a number.
+little data says so rather than showing a number. The precisions above are per-pass figures
+derived from synthetic `ε`; measured against real recordings they need roughly **6× more
+passes** than stated ([VALIDATION.md](VALIDATION.md)).
 
 ## Status — read this before believing anything
 
-- **Everything above is validated on synthetic audio**, with known ground truth, by 180+ tests.
-- It has been **deployed once**, on an indoor USB microphone with internet ADS-B. **No
-  real-world detection has been confirmed yet.**
-- Indoor is for proving the pipeline, not for producing soundings: walls attenuate, and mains
-  hum at 60 Hz sits directly in the propeller band.
-- The numbers above are what the implementation achieves on synthetics. Real passes manoeuvre,
-  change power, and sit under real wind noise.
+**Tested against real recordings**, not only its own synthetics — see
+[VALIDATION.md](VALIDATION.md). On 2,135 clips of AeroSonicDB (YPAD-0523), at the deployed
+settings:
+
+| | |
+|---|---|
+| Propeller aircraft detected | **61.6 %** (turboprop 72.8 %, **piston 27.0 %**) |
+| False positives, 274 length-matched label-verified windows | **0** |
+| Turbofans fired on | 0 of 474 *(correct — jets are broadband, not comb-tonal)* |
+| Saab 340 blade-pass, 21 passes | **91.4 Hz measured vs 92.3 Hz theoretical** |
+
+Four things that validation changed, which no synthetic test could have told us:
+
+- **`ε` is ~2.4× worse on real audio** than the synthetic median, and pass counts scale as
+  `ε²`, so precision figures below are **optimistic by roughly 6×** in required passes.
+- **Piston aircraft are the weak case at 27 %** — and they are most of what a backyard
+  station hears.
+- **The detection threshold was calibrated against the wrong noise.** Pink noise peaks at 8.9;
+  real background reaches 17.8. The deployed value of 20 survives, with far less margin than
+  believed, and is measurably too conservative.
+- **Ground-source rejection is still untested on real audio** — nothing false-positived, so
+  nothing exercised it.
+
+Still true: the live station has **not yet confirmed a detection of its own**, the atmospheric
+inversion has never run on real passes, and indoors is for proving the pipeline rather than
+producing soundings, since mains hum at 60 Hz sits directly in the propeller band.
 
 Several figures here were **wrong and were corrected** after being measured properly. The
 corrections are recorded in the documents rather than quietly edited away.
@@ -121,6 +142,7 @@ exists because unheard passes get stored.
 | [BUILD.md](BUILD.md) | What is built, what is cut, and the retention policy |
 | [DESIGN.md](DESIGN.md) | Architecture, detection paths, hardware, data model |
 | [APPLICATIONS.md](APPLICATIONS.md) | The science, with derivations and honest precision |
+| [VALIDATION.md](VALIDATION.md) | Measured against real recordings, including what failed |
 | [PRIOR-ART.md](PRIOR-ART.md) | What already exists, and whether researchers would care |
 | [SCINTILLATION.md](SCINTILLATION.md) | Turbulence from tonal scintillation, worked up |
 | [NETWORK.md](NETWORK.md) | What sharing reports between stations would add |
