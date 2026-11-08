@@ -55,6 +55,52 @@ def test_epsilon_is_small_and_consistent_with_f0_error(label, kw):
     assert f0_err < max(10.0 * r.epsilon, 0.005)
 
 
+# A live station passes an absolute unix time as `t_offset`; the AeroSonicDB harness passes
+# none at all. That one argument was the difference between 68.2% detection on the corpus and
+# 13 consecutive unmatched passes on the deployed station, because `least_squares` runs with
+# `x_scale=1.0` and its step tolerance scales with ||x|| -- which an absolute t0 dominates.
+# The solver stopped after one step and still reported success.
+#
+# Measured on a retained near-miss clip, same audio and band: 66.5 m/s at 1791 m in local
+# time against 25.7 m/s at 150 m in absolute time, with ADS-B truth at 66.3 m/s and 1835 m.
+# So assert the invariant rather than the symptom: t_offset labels the time axis, so it must
+# move t0_heard by exactly itself and leave every other quantity untouched.
+LIVE_EPOCH = 1_794_114_900.0
+
+
+@pytest.mark.parametrize(
+    "label,kw", [c for c in CASES if c[0] in {"clean", "snr0", "far5km"}],
+    ids=["clean", "snr0", "far5km"],
+)
+def test_fit_is_independent_of_the_time_origin(label, kw):
+    fo = synth.Flyover(seed=kw.pop("seed", 7), **kw)
+    samples, _ = synth.render(fo)
+    local = fit.fit_comb(samples, fo.sample_rate, band=BAND, n_harmonics=4, t_offset=0.0)
+    live = fit.fit_comb(
+        samples, fo.sample_rate, band=BAND, n_harmonics=4, t_offset=LIVE_EPOCH
+    )
+    assert live.t0_heard == pytest.approx(local.t0_heard + LIVE_EPOCH, abs=1e-3)
+    assert live.f0 == pytest.approx(local.f0, rel=1e-9)
+    assert live.speed == pytest.approx(local.speed, rel=1e-9)
+    assert live.cpa_distance == pytest.approx(local.cpa_distance, rel=1e-9)
+    assert live.epsilon == pytest.approx(local.epsilon, rel=1e-9)
+    # comb contrast is computed against the ridge, so it broke the same way and silently:
+    # the station logged "contrast -0.19" for a pass that matches ADS-B to 2.4%.
+    assert live.notes["comb_score"] == pytest.approx(local.notes["comb_score"], rel=1e-9)
+
+
+def test_absolute_time_does_not_fake_convergence():
+    """The failure reported success, which is what let it run unnoticed for a whole session."""
+    fo = synth.Flyover(seed=7)
+    samples, truth = synth.render(fo)
+    r = fit.fit_comb(
+        samples, fo.sample_rate, band=BAND, n_harmonics=4, t_offset=LIVE_EPOCH
+    )
+    assert r.converged
+    assert r.speed == pytest.approx(truth["speed"], rel=0.10)
+    assert r.cpa_distance == pytest.approx(truth["cpa_distance"], rel=0.25)
+
+
 def test_close_passes_are_harder_than_distant_ones():
     """The sharp sweep of a close pass costs frequency resolution. Physical, not a bug."""
     near, _ = run(cpa_distance=400, snr_db=20)

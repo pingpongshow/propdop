@@ -321,7 +321,22 @@ def fit_straight_pass(
     The f0 bound is deliberately tight: the geometric mean of the two asymptotes cancels the
     Doppler factor to first order, so the seed is good to a few percent and there is no reason
     to let the optimiser wander an octave away and trade f0 against speed.
+
+    `t` is re-centred on its own first sample before fitting. `least_squares` is called with
+    the default `x_scale=1.0`, so its step test is `||dx|| < xtol * (xtol + ||x||)` over the
+    whole parameter vector -- and with an absolute unix time as t0, `||x||` is ~1.79e9 and
+    that tolerance becomes ~18. The solver then stops after one or two steps and reports
+    `success`, so the caller sees `converged=True` on a fit that never moved. Measured on a
+    retained clip: the same audio and band gave 66.5 m/s at 1791 m with local times and
+    25.7 m/s at 150 m with absolute ones, against ADS-B truth of 66.3 m/s at 1835 m.
+
+    Re-centring rather than rescaling keeps the fit itself unchanged where it was already
+    well conditioned, which is what makes the AeroSonicDB numbers in VALIDATION.md still
+    comparable -- that harness passes no `t_offset`, which is exactly why 2,135 clips could
+    not see this.
     """
+    t_ref = float(t[0]) if t.size else 0.0
+    t = t - t_ref
     f0, speed, cpa, t0 = seed_parameters(t, f, c)
     w = np.ones_like(f) if weights is None else np.sqrt(np.clip(weights, 0.0, None))
 
@@ -350,12 +365,12 @@ def fit_straight_pass(
             best = res
 
     if best is None:
-        return (f0, speed, cpa, t0), False
+        return (f0, speed, cpa, t0 + t_ref), False
     return (
         float(best.x[0]),
         float(best.x[1]),
         float(best.x[2]),
-        float(best.x[3]),
+        float(best.x[3]) + t_ref,
     ), bool(best.success)
 
 
@@ -595,7 +610,12 @@ def fit_comb(
     samples = np.asarray(samples, dtype=float)
     n = samples.size
     dt = 1.0 / sample_rate
-    t_signal = np.arange(n) * dt + t_offset
+    # Everything below works in CLIP-LOCAL time, starting at zero; `t_offset` is added back
+    # only on the way out. It is a label for the time axis, so it must shift `t0_heard` and
+    # change nothing else -- and at the absolute unix times the live pipeline passes
+    # (~1.79e9) it did far more than that. See `fit_straight_pass` for the mechanism and for
+    # why no corpus run could ever have caught it.
+    t_signal = np.arange(n) * dt
 
     spec_band = (band[0] * 0.5, min(band[1] * (n_harmonics + 1), sample_rate / 2.0 * 0.95))
 
@@ -619,7 +639,7 @@ def fit_comb(
         keep = rs >= thresh
         if keep.sum() < 12:
             keep = rs >= np.percentile(rs, 25.0)
-        p, ok = fit_straight_pass(rt[keep] + t_offset, rf[keep], weights=rs[keep], c=c)
+        p, ok = fit_straight_pass(rt[keep], rf[keep], weights=rs[keep], c=c)
         return p, ok, keep
 
     win = window_s or 1.0
@@ -640,8 +660,8 @@ def fit_comb(
                 params, ok, keep = p2, ok2, keep2
                 f0, speed, cpa, t0 = params
 
-    ridge_times, ridge_freqs, ridge_strength = rt + t_offset, rf, rs
-    model_at_ridge = _model(ridge_times, f0, speed, cpa, t0, c)
+    ridge_freqs, ridge_strength = rf, rs
+    model_at_ridge = _model(rt, f0, speed, cpa, t0, c)
     eps_ridge = float(
         np.sqrt(np.mean(((ridge_freqs[keep] - model_at_ridge[keep]) / f0) ** 2))
     )
@@ -672,7 +692,7 @@ def fit_comb(
     # epsilon from the fundamental's phase-tracked frequency against the model. Trim the edges,
     # where filtfilt transients and the weakest signal both live.
     f1 = freq_tracks[harmonics[0]] / harmonics[0]
-    f1_model = np.interp(times + t_offset, t_signal, f_model)
+    f1_model = np.interp(times, t_signal, f_model)
     trim = _trim(times.size)
     eps = float(np.sqrt(np.mean(((f1[trim] - f1_model[trim]) / f0) ** 2)))
 
@@ -680,7 +700,7 @@ def fit_comb(
         f0=f0,
         speed=speed,
         cpa_distance=cpa,
-        t0_heard=t0,
+        t0_heard=t0 + t_offset,
         epsilon=eps,
         epsilon_ridge=eps_ridge,
         n_harmonics=len(harmonics),
@@ -689,7 +709,7 @@ def fit_comb(
         freq_tracks=freq_tracks,
         amp_tracks=amp_tracks,
         log_amp_fluct=fluct,
-        ridge_times=ridge_times,
+        ridge_times=rt + t_offset,
         ridge_freqs=ridge_freqs,
         model_freqs=model_at_ridge,
         noise_bias=noise_bias,
