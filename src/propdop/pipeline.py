@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import adsb, associate, detect, geo, node, store
+from . import adsb, associate, detect, geo, livespec, node, store
 
 
 def _analysis_worker(payload: dict):
@@ -149,6 +149,19 @@ class PipelineConfig:
     spectrogram_path: str | None = None
     spectrogram_window_s: float = 60.0
     spectrogram_band: tuple[float, float] = (20.0, 400.0)
+    # The live panel. `live_window_s` is the transform length and so the floor on latency: a
+    # column cannot exist until its last sample does. 1 s buys 1 Hz resolution, which is what
+    # it takes to see a 70 Hz fundamental and its harmonics 70 Hz apart as separate lines --
+    # shorten it and the comb smears into one band, which is the real reason this cannot be
+    # made arbitrarily live. `live_hop_s` is how often a column is published; at half the
+    # window, successive columns overlap and the panel moves smoothly.
+    live_spectrogram: bool = True
+    live_window_s: float = 1.0
+    live_hop_s: float = 0.5
+    live_history_s: float = 120.0
+    # Columns are quantised against this fixed dB range, the same one the published snapshot
+    # uses, so the live panel and the heartbeat PNG cannot disagree about what a colour means.
+    live_db_range: tuple[float, float] = (-6.0, 24.0)
     heartbeat_s: float = 30.0
     first_analysis_s: float = 120.0
     analyse_in_process: bool = False
@@ -211,8 +224,11 @@ class Pipeline:
     # -- threads -------------------------------------------------------------------------
 
     def start(self) -> "Pipeline":
-        for target in (self._capture_loop, self._adsb_loop, self._analysis_loop,
-                       self._status_loop):
+        targets = [self._capture_loop, self._adsb_loop, self._analysis_loop,
+                   self._status_loop]
+        if self.cfg.live_spectrogram:
+            targets.append(self._live_spectrogram_loop)
+        for target in targets:
             t = threading.Thread(target=self._guard(target), daemon=True, name=target.__name__)
             t.start()
             self._threads.append(t)
@@ -271,6 +287,85 @@ class Pipeline:
             self._write_status()
             self._write_spectrogram()
             self._stop.wait(self.cfg.heartbeat_s)
+
+    def _live_spectrogram_loop(self) -> None:
+        """Publish one STFT column per hop, for the dashboard to draw as it arrives.
+
+        Separate from `_status_loop` because the two cadences have nothing to do with each
+        other: the heartbeat is about proving the process is alive, and 30 s is plenty for
+        that, while this is about a human watching an aircraft go past. Running them together
+        would mean choosing one number for both.
+
+        The cost is one 8000-point real FFT and a median over the rolling buffer, a couple of
+        milliseconds twice a second. The FFT releases the GIL, which is why this may share a
+        process with capture when analysis may not.
+        """
+        rate = int(self.node.archive_ring.sample_rate)
+        nperseg = max(16, int(round(self.cfg.live_window_s * rate)))
+        lo, hi = self.cfg.spectrogram_band
+        freqs = np.fft.rfftfreq(nperseg, 1.0 / rate)
+        keep = (freqs >= lo) & (freqs <= hi)
+        n_bins = int(keep.sum())
+        capacity = max(16, int(round(self.cfg.live_history_s / max(self.cfg.live_hop_s, 1e-3))))
+        window = np.hanning(nperseg)
+        db_lo, db_hi = self.cfg.live_db_range
+        # The baseline is the same per-frequency median the snapshot uses, over the same
+        # minute, kept rolling instead of recomputed from scratch.
+        baseline_cols = max(8, int(round(self.cfg.spectrogram_window_s
+                                         / max(self.cfg.live_hop_s, 1e-3))))
+        history: list = []            # the rolling minute the baseline is taken over
+
+        def columns_of(audio):
+            """Every hop-spaced column in `audio`, oldest first."""
+            step = max(1, int(round(self.cfg.live_hop_s * rate)))
+            return [
+                20.0 * np.log10(np.abs(np.fft.rfft(audio[i : i + nperseg] * window))[keep]
+                                + 1e-12)
+                for i in range(0, audio.size - nperseg + 1, step)
+            ]
+
+        try:
+            writer = livespec.Writer(
+                livespec.ring_path(self.cfg.db_path), rate=rate, n_bins=n_bins,
+                f_lo=float(freqs[keep][0]), f_hi=float(freqs[keep][-1]),
+                hop_s=self.cfg.live_hop_s, window_s=self.cfg.live_window_s,
+                capacity=capacity, db_lo=db_lo, db_hi=db_hi,
+            )
+        except OSError:
+            self.stats["last_error"] = traceback.format_exc(limit=3)
+            return
+
+        try:
+            # Seed the baseline from the audio already in the archive. Without this the median
+            # is taken over the one column just computed, which is that column, so every bin
+            # reads exactly zero and the panel is a flat grey for its first minute -- at the
+            # moment someone has just opened it to see whether the station works.
+            try:
+                history = columns_of(
+                    self.node.archived(seconds=self.cfg.spectrogram_window_s)
+                )[-baseline_cols:]
+            except Exception:
+                history = []
+
+            while not self._stop.is_set():
+                started = time.monotonic()
+                try:
+                    audio = self.node.archived(seconds=self.cfg.live_window_s)
+                    if audio.size >= nperseg:
+                        seg = audio[-nperseg:] * window
+                        col_db = 20.0 * np.log10(np.abs(np.fft.rfft(seg))[keep] + 1e-12)
+                        history.append(col_db)
+                        if len(history) > baseline_cols:
+                            del history[0]
+                        base = np.median(np.asarray(history), axis=0)
+                        norm = (col_db - base - db_lo) / (db_hi - db_lo)
+                        writer.append((np.clip(norm, 0.0, 1.0) * 255.0).astype(np.uint8))
+                        self.stats["live_columns"] = writer.count
+                except Exception:
+                    self.stats["last_error"] = traceback.format_exc(limit=3)
+                self._stop.wait(max(0.0, self.cfg.live_hop_s - (time.monotonic() - started)))
+        finally:
+            writer.close()
 
     def _write_spectrogram(self) -> None:
         """Publish a small spectrogram of the recent past, for the dashboard to draw.

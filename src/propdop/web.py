@@ -22,16 +22,17 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
+import json
 import math
 from pathlib import Path
 
 import numpy as np
 
-from . import __version__, detect, store
+from . import __version__, detect, livespec, store
 
 try:  # keep the core import-light; the web extra is optional
     from fastapi import FastAPI, HTTPException, Response
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, StreamingResponse
 except ModuleNotFoundError as exc:  # pragma: no cover
     raise ModuleNotFoundError(
         "the web UI needs the 'web' extra: pip install '.[web]'"
@@ -85,6 +86,60 @@ LIVE_SCRIPT = """<script>
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) tick();   // catch up at once when the tab comes back
   });
+
+  // -- the live spectrogram ---------------------------------------------------------------
+  // Columns arrive over server-sent events and are drawn into an ImageData kept at the ring's
+  // native size, which CSS then stretches to the panel. Drawing at native size means the
+  // browser scales once, on the GPU, instead of this code resampling on every frame.
+  (function () {
+    var cv = document.getElementById("spec-canvas");
+    if (!cv || typeof EventSource === "undefined") return;
+    var ctx = cv.getContext("2d", {alpha: false});
+    var img = null, pal = null, bins = 0, feed = document.getElementById("spec-feed");
+    var es = new EventSource("/api/spectrogram/stream");
+
+    es.addEventListener("meta", function (ev) {
+      var m = JSON.parse(ev.data);
+      bins = m.n_bins;
+      cv.width = m.capacity;
+      cv.height = bins;
+      img = ctx.createImageData(m.capacity, bins);
+      for (var i = 3; i < img.data.length; i += 4) img.data[i] = 255;   // opaque
+      pal = m.palette;
+    });
+
+    es.addEventListener("cols", function (ev) {
+      if (!img) return;
+      var d = JSON.parse(ev.data);
+      var raw = atob(d.b64), w = img.width, k = Math.min(d.n, w), px = img.data;
+      // Scroll left by k columns, one row at a time. copyWithin on the row's slice is a
+      // memmove, so this is a few hundred microseconds for a panel this size.
+      if (k < w) {
+        for (var y = 0; y < bins; y++) {
+          var row = y * w * 4;
+          px.copyWithin(row, row + k * 4, row + w * 4);
+        }
+      }
+      // The newest k columns land at the right edge. Row 0 of an ImageData is the top of the
+      // canvas, and high frequency belongs at the top, so the bin index runs backwards.
+      var first = d.n - k;
+      for (var c = 0; c < k; c++) {
+        var src = (first + c) * bins, x = w - k + c;
+        for (var b = 0; b < bins; b++) {
+          var v = raw.charCodeAt(src + b) * 3, o = ((bins - 1 - b) * w + x) * 4;
+          px[o] = pal[v]; px[o + 1] = pal[v + 1]; px[o + 2] = pal[v + 2];
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      if (feed) feed.textContent = "";
+    });
+
+    es.onerror = function () {
+      // EventSource reconnects on its own; say so rather than leaving a frozen panel
+      // looking like a working one.
+      if (feed) feed.textContent = "\u2014 feed interrupted, reconnecting\u2026";
+    };
+  })();
 })();
 </script>
 """
@@ -576,22 +631,53 @@ def _spectrogram_snapshot(db_path: str) -> dict | None:
         return None
 
 
-def spectrogram_svg(meta: dict | None, cache_bust: str = "") -> str:
-    """Frame the published PNG with axes and a magnitude scale.
+def _sse(event: str, data: str) -> str:
+    """One server-sent event. Every line of the payload needs its own `data:` prefix."""
+    body = "".join(f"data: {line}\n" for line in data.split("\n"))
+    return f"event: {event}\n{body}\n"
 
-    The heatmap itself is a raster served from /spectrogram.png; only the axes, the colour bar
-    and the hover readout are SVG. Drawing the cells as SVG rects would mean tens of thousands
-    of elements for one panel.
+
+def _live_meta(db_path: str) -> dict | None:
+    """The live ring's geometry, or None when the capture process publishes no columns."""
+    reader = livespec.open_reader(db_path)
+    if reader is None:
+        return None
+    try:
+        if reader.seq <= 0:
+            return None
+        return {
+            "f_lo": reader.f_lo, "f_hi": reader.f_hi,
+            "window_s": reader.capacity * reader.hop_s,
+            "hop_s": reader.hop_s, "transform_s": reader.window_s,
+            "db_lo": reader.db_lo, "db_hi": reader.db_hi,
+        }
+    finally:
+        reader.close()
+
+
+def spectrogram_svg(meta: dict | None, cache_bust: str = "",
+                    live: dict | None = None) -> str:
+    """Frame the heatmap with axes and a magnitude scale.
+
+    Only the axes, the colour bar and the hover readout are SVG; drawing the cells as rects
+    would mean tens of thousands of elements for one panel. The heatmap itself is either a
+    `<canvas>` fed column by column over server-sent events, or -- when no live ring is being
+    published -- the raster at /spectrogram.png, which the capture process rewrites once a
+    heartbeat.
+
+    The axes are identical either way, so the panel does not change shape when the capture
+    process restarts and the live feed drops back to the still.
     """
     W, H = 720, 268
     L, R, T, B = 48, 86, 10, 30
     pw, ph = W - L - R, H - T - B
-    if meta is None:
+    if live is None and meta is None:
         return ('<p class="note">No spectrogram yet. The capture process publishes one every '
                 "heartbeat once it has a couple of minutes of audio.</p>")
 
-    f_lo, f_hi = meta["f_lo"], meta["f_hi"]
-    win = meta["window_s"]
+    source = live or meta
+    f_lo, f_hi = source["f_lo"], source["f_hi"]
+    win = source["window_s"]
     # One hue, so the bar is just the ramp sampled as gradient stops.
     stops = "".join(
         f'<stop offset="{t * 100:.0f}%" stop-color="rgb({c[0]},{c[1]},{c[2]})"/>'
@@ -607,6 +693,12 @@ def spectrogram_svg(meta: dict | None, cache_bust: str = "") -> str:
         f'<text x="{L - 7}" y="{fy(h) + 3.5:.1f}" class="tk" text-anchor="end">{h}</text>'
         for h in yticks
     )
+    freshness = (
+        f'Live: a new column every {live["hop_s"]:.1f} s, each one a '
+        f'{live["transform_s"]:.1f} s transform. <span id="spec-feed"></span>'
+        if live else
+        f'Updated {meta["age_s"]:.0f} s ago.'
+    )
     xstep = 15 if win <= 90 else 30
     xs = [t for t in range(0, int(win) + 1, xstep)]
     xlab = "".join(
@@ -618,6 +710,18 @@ def spectrogram_svg(meta: dict | None, cache_bust: str = "") -> str:
     )
     # The propeller band, so the eye knows where to look.
     band_y0, band_y1 = fy(300.0), fy(50.0)
+    # A canvas cannot be an SVG child, and reproducing the viewBox's arithmetic in CSS to
+    # position one on top would be a second source of truth for the plot rectangle.
+    # `foreignObject` puts it inside the same coordinate system as the axes.
+    heat = (
+        f'<foreignObject x="{L}" y="{T}" width="{pw}" height="{ph}">'
+        f'<canvas xmlns="http://www.w3.org/1999/xhtml" id="spec-canvas"'
+        f' style="width:100%;height:100%;display:block"></canvas>'
+        f"</foreignObject>"
+        if live else
+        f'<image x="{L}" y="{T}" width="{pw}" height="{ph}" preserveAspectRatio="none"'
+        f' href="/spectrogram.png{cache_bust}"/>'
+    )
     return f"""<svg viewBox="0 0 {W} {H}" width="100%" role="img" id="spec-svg"
      aria-label="live spectrogram of the last {win:.0f} seconds, {f_lo:.0f} to {f_hi:.0f} Hz">
   <defs><linearGradient id="specramp" x1="0" y1="1" x2="0" y2="0">{stops}</linearGradient></defs>
@@ -628,8 +732,7 @@ def spectrogram_svg(meta: dict | None, cache_bust: str = "") -> str:
     #spec-svg .bandmark {{ stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3;
                            fill: none; opacity: .55; }}
   </style>
-  <image x="{L}" y="{T}" width="{pw}" height="{ph}" preserveAspectRatio="none"
-         href="/spectrogram.png{cache_bust}"/>
+  {heat}
   <rect x="{L}" y="{T}" width="{pw}" height="{ph}" fill="none" stroke="var(--line)"/>
   <rect x="{L}" y="{band_y0:.1f}" width="{pw}" height="{band_y1 - band_y0:.1f}" class="bandmark"/>
   <text x="{L + 5}" y="{band_y0 - 4:.1f}" class="cap" fill="var(--warn)">50-300 Hz propeller band</text>
@@ -639,15 +742,15 @@ def spectrogram_svg(meta: dict | None, cache_bust: str = "") -> str:
   <text x="{L + pw / 2:.1f}" y="{H - 2}" class="cap" text-anchor="middle">seconds ago</text>
   <rect x="{W - R + 16}" y="{T}" width="12" height="{ph}" fill="url(#specramp)"
         stroke="var(--line)"/>
-  <text x="{W - R + 33}" y="{T + 8}" class="tk">+{meta["db_hi"]:.0f}</text>
-  <text x="{W - R + 33}" y="{T + ph}" class="tk">{meta["db_lo"]:.0f}</text>
+  <text x="{W - R + 33}" y="{T + 8}" class="tk">+{source["db_hi"]:.0f}</text>
+  <text x="{W - R + 33}" y="{T + ph}" class="tk">{source["db_lo"]:.0f}</text>
   <text x="{W - R + 33}" y="{T + ph + 14}" class="cap">dB over median</text>
   <rect id="spec-hit" x="{L}" y="{T}" width="{pw}" height="{ph}" fill="transparent"
         data-flo="{f_lo}" data-fhi="{f_hi}" data-win="{win}"/>
 </svg>
 <p class="note" id="spec-readout">Brighter is louder than this minute's median at that
 frequency, so steady wind and mains hum sit near zero and a passing tone stands out as a
-sweeping curve. Updated {meta["age_s"]:.0f} s ago. <span id="spec-cursor" class="mono"></span></p>"""
+sweeping curve. {freshness} <span id="spec-cursor" class="mono"></span></p>"""
 
 
 def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
@@ -740,7 +843,7 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
 <nav><a href="/">dashboard</a><a href="/passes">passes</a><a href="/api/status">api</a></nav>
 </div></header><main>{body}</main></body></html>"""
 
-    def _live_fragments(db) -> dict:
+    def _live_fragments(db, initial: bool = False) -> dict:
         """The parts of the dashboard that change minute to minute."""
         live = _live_status(db_path)
         overhead = (live or {}).get("overhead") or []
@@ -855,12 +958,20 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             "shown; the lobe fills in as passes are detected."
         )
         spec = _spectrogram_snapshot(db_path)
+        # When the panel is live, the canvas owns it and must not be replaced on a poll:
+        # swapping the fragment would destroy the element and with it the EventSource feeding
+        # it. `None` is the existing signal for "leave this region alone". The first render
+        # still has to produce the canvas, which is what `initial` is for.
+        live = _live_meta(db_path)
+        bust = f"?t={int(spec['t_end'])}" if spec else ""
         return {
             "radar": radar_svg(envelope, overhead, recent),
             # The cache-buster is what makes the <image> refetch; without it the browser
             # serves the first PNG forever and the panel looks frozen.
-            "spectrogram": spectrogram_svg(
-                spec, f"?t={int(spec['t_end'])}" if spec else ""
+            "spectrogram": (
+                spectrogram_svg(spec, bust, live) if initial
+                else None if live
+                else spectrogram_svg(spec, bust)
             ),
             "overhead": over,
             "candidates": cand,
@@ -885,6 +996,68 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             headers={"Cache-Control": "no-store, max-age=0"},
         )
 
+    @app.get("/api/spectrogram/stream")
+    async def spectrogram_stream(since: int | None = None):
+        """Push STFT columns to the browser as the capture process publishes them.
+
+        Server-sent events rather than a WebSocket: the traffic is one-way, SSE is a plain
+        HTTP response that reconnects by itself, and it needs nothing in the page beyond
+        `EventSource` -- which matters, because the dashboard has to work on a network with
+        no outbound route and so cannot fetch a client library.
+
+        The first event carries the geometry and the palette, so the browser can size its
+        canvas and colour the bytes without a second request; after that each event is a run
+        of new columns. A client that falls behind is handed the freshest full ring rather
+        than stale slots -- see `livespec.Reader.read_since`.
+        """
+        import asyncio as _asyncio
+        import base64 as _base64
+
+        reader = livespec.open_reader(db_path)
+        if reader is None:
+            raise HTTPException(status_code=503, detail="no live spectrogram is being published")
+
+        async def events():
+            nonlocal reader
+            cursor = since
+            try:
+                yield _sse("meta", json.dumps({
+                    "n_bins": reader.n_bins, "f_lo": reader.f_lo, "f_hi": reader.f_hi,
+                    "hop_s": reader.hop_s, "window_s": reader.window_s,
+                    "capacity": reader.capacity,
+                    "palette": list(_spectrogram_palette()),
+                }))
+                idle = 0.0
+                while True:
+                    if reader.stale():       # the capture process restarted and recreated it
+                        reader.close()
+                        fresh = livespec.open_reader(db_path)
+                        if fresh is None:
+                            return
+                        reader, cursor = fresh, None
+                    cursor, cols = reader.read_since(cursor)
+                    if cols.size:
+                        idle = 0.0
+                        yield _sse("cols", json.dumps({
+                            "seq": cursor,
+                            "n": int(cols.shape[0]),
+                            "b64": _base64.b64encode(cols.tobytes()).decode("ascii"),
+                        }))
+                    else:
+                        idle += reader.hop_s
+                        if idle >= 15.0:
+                            idle = 0.0
+                            yield ": keepalive\n\n"   # stops an idle proxy closing us
+                    await _asyncio.sleep(max(reader.hop_s * 0.5, 0.05))
+            finally:
+                reader.close()
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     @app.get("/api/live")
     def api_live():
         """Fragments for the live regions, polled by the dashboard."""
@@ -905,7 +1078,7 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             hours = db.scintillation_by_hour()
             eps_med = em.get("epsilon_median")
 
-            frag = _live_fragments(db)
+            frag = _live_fragments(db, initial=True)
             cards = "".join(
                 f'<div class="card"><div class="k">{_esc(k)}</div>'
                 f'<div class="v"{idattr}>{v}</div></div>'

@@ -315,3 +315,97 @@ def test_spectrogram_endpoint_serves_the_published_snapshot(spec_client):
     assert "/spectrogram.png?t=1700000000" in body, "cache-buster or the panel is missing"
     assert "50-300 Hz propeller band" in body
     assert "spectrogram" in client.get("/api/live").json()
+
+
+# -- the live spectrogram panel ------------------------------------------------------------
+#
+# The panel is a canvas fed by server-sent events when the capture process publishes a ring,
+# and the heartbeat PNG when it does not. Both paths have to render, and the live one has to
+# survive the poll that replaces every other live region.
+
+
+@pytest.fixture
+def live_ring(tmp_path, monkeypatch):
+    """A station publishing live columns, under this test's own runtime directory."""
+    import numpy as np
+
+    from propdop import livespec
+
+    monkeypatch.setenv("PROPDOP_RUNTIME", str(tmp_path))
+    db = str(tmp_path / "passes.sqlite")
+    writer = livespec.Writer(livespec.ring_path(db), rate=8000, n_bins=6, f_lo=20.0,
+                             f_hi=400.0, hop_s=0.05, window_s=1.0, capacity=8)
+    for i in range(4):
+        writer.append(np.full(6, 40 + 20 * i, np.uint8))
+    yield db, writer
+    writer.close()
+
+
+def _read_events(resp, want):
+    """Collect `want` server-sent events from a streaming response."""
+    out, buf = [], ""
+    for chunk in resp.iter_text():
+        buf += chunk
+        while "\n\n" in buf:
+            raw, buf = buf.split("\n\n", 1)
+            if not raw.strip() or raw.lstrip().startswith(":"):
+                continue
+            lines = raw.split("\n")
+            out.append((lines[0].replace("event: ", ""),
+                        "".join(x[6:] for x in lines[1:] if x.startswith("data: "))))
+            if len(out) >= want:
+                return out
+    return out
+
+
+def test_the_stream_says_so_plainly_when_nothing_is_publishing(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROPDOP_RUNTIME", str(tmp_path))
+    c = TestClient(web.create_app(tmp_path / "passes.sqlite"))
+    assert c.get("/api/spectrogram/stream").status_code == 503
+
+
+def test_the_stream_opens_with_the_geometry_then_sends_columns(live_ring):
+    """One connection has to carry everything the browser needs: a client that had to fetch a
+    palette separately would draw the first columns in the wrong colours."""
+    import base64
+    import json
+
+    import numpy as np
+
+    db, writer = live_ring
+    c = TestClient(web.create_app(db))
+    with c.stream("GET", "/api/spectrogram/stream") as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        events = _read_events(resp, 2)
+
+    assert [name for name, _ in events] == ["meta", "cols"]
+    meta = json.loads(events[0][1])
+    assert meta["n_bins"] == 6 and meta["capacity"] == 8
+    assert len(meta["palette"]) == 768          # 256 RGB triples, so no second request
+    cols = json.loads(events[1][1])
+    arr = np.frombuffer(base64.b64decode(cols["b64"]), np.uint8).reshape(cols["n"], -1)
+    assert arr[:, 0].tolist() == [40, 60, 80, 100]
+
+
+def test_a_live_panel_is_not_replaced_by_the_poll_that_refreshes_everything_else(live_ring):
+    """Swapping the fragment would destroy the canvas and the EventSource feeding it, so the
+    panel would go blank every five seconds. `None` means "leave this region alone"."""
+    db, _ = live_ring
+    c = TestClient(web.create_app(db))
+
+    page = c.get("/").text
+    assert 'id="spec-canvas"' in page, "the first render has to create the canvas"
+    assert "/spectrogram.png" not in page
+
+    live = c.get("/api/live").json()
+    assert live["spectrogram"] is None
+    assert live["radar"] is not None            # the other regions still refresh
+
+
+def test_the_panel_falls_back_to_the_published_still(client):
+    """With no ring -- an older capture process, or one that has just restarted -- the panel
+    must still draw, from the file the heartbeat writes."""
+    page = client.get("/").text
+    assert 'id="spec-canvas"' not in page
+    assert client.get("/api/live").json()["spectrogram"] is not None

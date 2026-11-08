@@ -174,6 +174,20 @@ audible and were not, so a notch with hollow marks beyond it is a direction the 
 in — a building, an embankment, a hillside. That is a measurement of shielding, and it only
 exists because unheard passes get stored.
 
+The spectrogram panel is **live**: a new column every half second, each one a 1 s transform,
+scrolling as the audio arrives. ALSA capture is exclusive, so the web process cannot open the
+microphone; the capture process publishes single STFT columns into a small shared-memory ring
+(`livespec.py`, in tmpfs where there is a runtime directory) and the dashboard streams them to
+a `<canvas>` over server-sent events. No framework and no client library, which is the whole
+point — `EventSource` is already in the browser.
+
+Half a second is the floor, and it is set by physics rather than plumbing: a light aircraft's
+fundamental sits at 60–90 Hz with harmonics about as far apart, so seeing the comb as separate
+lines needs roughly 1 Hz resolution, and a 1 Hz bin needs a 1 s transform. Shorter frames
+smear the comb into a band. If the capture process is not publishing — an older build, or one
+that has just restarted — the panel falls back to the still image written each heartbeat, with
+the same axes, so it degrades rather than disappearing.
+
 ## Documents
 
 | File | Contents |
