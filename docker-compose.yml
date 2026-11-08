@@ -29,7 +29,8 @@ services:
       - "17"              # host 'audio' gid; by number, since the container's group table differs
     environment:
       - PROPDOP_DATA=/data
-      - TZ=America/Los_Angeles
+      # Set TZ in a local .env to your own zone; the dashboard labels whatever it gets.
+      - TZ=${TZ:-UTC}
     restart: unless-stopped
     command: ["run"]
     # The image's default healthcheck probes HTTP, which only the web service serves. Capture
@@ -53,7 +54,8 @@ services:
       - ./data:/data
     environment:
       - PROPDOP_DATA=/data
-      - TZ=America/Los_Angeles
+      # Set TZ in a local .env to your own zone; the dashboard labels whatever it gets.
+      - TZ=${TZ:-UTC}
     ports:
       - "8475:8475"          # verified free on the host
     restart: unless-stopped

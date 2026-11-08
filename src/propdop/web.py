@@ -244,8 +244,9 @@ def _clock(ts, fmt: str = "%m-%d %H:%M:%S") -> str:
 
     The zone is **always labelled**, because this is the one number on the dashboard that an
     operator checks against their own memory and it is read off whatever zone the host happens
-    to be in. A Raspberry Pi ships as UTC, so a station in California shows 15:47 for a pass
-    its operator heard at 07:47 and the two records cannot be reconciled by eye. Nothing here
+    to be in. A Raspberry Pi ships as UTC, so a station whose operator is some hours off it
+    shows one time for a pass they heard at another, and the two records cannot be reconciled
+    by eye. Nothing here
     converts: inventing a zone the host has not been told about would be worse. The fix is
     `timedatectl set-timezone`, and until then the label says which clock this is.
     """

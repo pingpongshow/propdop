@@ -316,8 +316,10 @@ fallback, and `P46T` no longer appears in two blocks with the later one winning.
 
 ### Confirmed live: the first ADS-B match the station has ever made
 
-Ten minutes after the fix was deployed, `a6b080` — a low, slow aircraft broadcasting no type
-code — passed at 953 m:
+Ten minutes after the fix was deployed a low, slow aircraft broadcasting no type code passed
+at 953 m. (Identifiers are withheld throughout: an ICAO address plus a timestamp locates the
+receiver, and this instrument's whole premise is that aircraft positions are public while the
+microphone's is not.)
 
 | | acoustic fit | ADS-B | error |
 |---|---|---|---|
@@ -341,8 +343,8 @@ accurate to 1.8 % in speed. The first was 2.97 % on one accurate to 0.3 %.
 ### `MIN_AIRCRAFT_SPEED` is too high, and now there is truth behind that
 
 DESIGN.md 3.1a justifies the 35.8 m/s (80 mph) floor as "road and rail run below ~35 m/s;
-aircraft above ~40 m/s". The aircraft half of that is **false at this site**. `a6b080` was
-doing **32.7 m/s by ADS-B**, and the operator heard it plainly. A second candidate at the same
+aircraft above ~40 m/s". The aircraft half of that is **false at this site**: the confirmed
+pass was doing **32.7 m/s by ADS-B**, and the operator heard it plainly. A second candidate at the same
 arrival was rejected with `too slow for an aircraft (23 m/s)`.
 
 Light aircraft in the circuit fly at 60–70 kt (31–36 m/s), so a station near an airfield sees
