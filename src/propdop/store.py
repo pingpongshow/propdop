@@ -451,6 +451,14 @@ class Store:
         for m in result.matches:
             tc = m.geometry.track.type_code if m.geometry.track else None
             n = blade_counts.get(tc)
+            # A match whose own screening said "not an aircraft" is kept -- ADS-B is better
+            # evidence than a self-assessed fit residual -- but the disagreement is recorded.
+            # These rows are the only honest way to recalibrate `plausible_aircraft`: each one
+            # is a pass with a known trajectory that the gate would have thrown away.
+            screened_out = (
+                None if m.detection.is_aircraft
+                else f"screened out, kept on ADS-B: {m.detection.reason}"
+            )
             self.add_pass(
                 station_id,
                 m.detection,
@@ -459,6 +467,7 @@ class Store:
                 blade_source="inferred" if n else None,
                 surface=surface,
                 clock_offset_s=result.clock_offset_s,
+                notes=screened_out,
             )
             n_matched += 1
         for det in result.unexplained:
@@ -484,22 +493,29 @@ class Store:
     def detection_rate(self, station_id: str | None = None) -> float:
         """Heard / (heard + should-have-been-heard). The denominator for 'unexplained'.
 
-        Jets are excluded from the denominator. This instrument is a harmonic-comb matched
-        filter for propellers and a turbofan has no comb to find, so counting airliners as
-        missed detections measures nothing. The deployed station reported 14.3 % while 10 of
-        its 12 misses were airliners; the real propeller denominator was 2.
+        Jets and rotorcraft are excluded from BOTH halves of the ratio. This instrument is a
+        harmonic-comb matched filter for fixed-wing propellers: a turbofan has no comb to find
+        and a helicopter does not fly the straight pass the model inverts, so counting either
+        as a missed detection measures nothing. The deployed station reported 14.3 % while 10
+        of its 12 misses were airliners; the real propeller denominator was 2.
+
+        The numerator carries the same filter, which it did not before. Jets are join
+        candidates (see `adsb.audible_candidates`), so one can now be matched and stored as a
+        heard pass -- and counting it on top of a denominator it was excluded from would score
+        the instrument on exactly the traffic it cannot measure.
 
         Rows recorded before `engine_class` was populated have it NULL, and those are kept:
         unknown is treated as a possible propeller, which is the conservative direction.
         """
         where, args = ("WHERE station_id = ?", (station_id,)) if station_id else ("", ())
+        joiner = "AND" if where else "WHERE"
+        not_jet = "(engine_class IS NULL OR engine_class NOT IN ('J', 'R'))"
         heard = self.query_one(
-            f"SELECT COUNT(*) FROM passes {where} {'AND' if where else 'WHERE'} icao24 IS NOT NULL",
+            f"SELECT COUNT(*) FROM passes {where} {joiner} icao24 IS NOT NULL AND {not_jet}",
             args,
         )[0]
-        not_jet = "(engine_class IS NULL OR engine_class NOT IN ('J', 'R'))"
         missed = self.query_one(
-            f"SELECT COUNT(*) FROM unheard {where} {'AND' if where else 'WHERE'} {not_jet}",
+            f"SELECT COUNT(*) FROM unheard {where} {joiner} {not_jet}",
             args,
         )[0]
         total = heard + missed

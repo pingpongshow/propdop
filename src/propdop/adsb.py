@@ -18,7 +18,17 @@ from scipy import interpolate, optimize
 from . import geo, physics
 
 # ICAO Doc 8643 type designators encode engine count and type (L1P, L2T, ...), not blade count.
-JET_CLASSES = frozenset({"J", "R"})
+# Engine classes with no fixed-wing propeller comb for this detector to find: turbofans are
+# broadband, and a helicopter's main rotor sits below the band while it does not fly the
+# straight constant-speed pass the model inverts.
+#
+# This governs the DENOMINATOR only -- "should this miss count against the instrument?" -- and
+# deliberately NOT which tracks the join may consider. Those are different questions, and
+# conflating them is how a jet the detector did fire on becomes an unexplained detection: with
+# no candidate to match, the one product that must never be wrong reports a non-cooperative
+# aircraft. Measured on AeroSonicDB, 2 of 474 turbofan clips fire at the deployed threshold.
+NON_PROPELLER_CLASSES = frozenset({"J", "R"})
+JET_CLASSES = NON_PROPELLER_CLASSES      # retained name, used by older callers
 
 # Doc 8643's engine letter is not in the ADS-B feed. adsb.lol and readsb publish the type
 # designator (`t`) and the emitter category, but no `desc`, so `engine_class` stayed None for
@@ -59,16 +69,21 @@ _register("P", """
     C150 C152 C162 C170 C172 C175 C177 C180 C182 C185 C188 C195 C206 C207 C210 C310
     C336 C337 C340 C402 C404 C411 C414 C421 CH7A CH70 COL4 DA20 DA36 DA40 DA42 DA50
     DA62 DR40 EVSS G115 GA7 GA8 GLAS GY80 J3 L4 M20P M20T M5 M7 NAVI P28A P28B P28R
-    P28S P28T P32R P32T P46T PA11 PA12 PA16 PA18 PA20 PA22 PA23 PA24 PA25 PA27 PA28
+    P28S P28T P32R P32T PA11 PA12 PA16 PA18 PA20 PA22 PA23 PA24 PA25 PA27 PA28
     PA30 PA31 PA32 PA34 PA38 PA39 PA44 PA46 PITT RV3 RV4 RV6 RV7 RV8 RV9 RV10 RV12
     RV14 S22T SR20 SR22 ST75 SUBA T206 T210 T303 T310 TOBA TRIN U206 V35 BL8 BT36
 """)
-_register("T", """
+# Rotorcraft, as "R" rather than by engine letter. Registering these as T/P was a real fault
+# and not a cosmetic one: `NON_PROPELLER_CLASSES` and `store.detection_rate`'s
+# `NOT IN ('J','R')` both existed, but NO type designator ever resolved to "R", so the whole
+# rotorcraft exclusion was dead code. The deployed station put an AS350 at 1,173 m into the
+# propeller denominator four times, and its score of 53.9 was the highest unheard row in the
+# database -- a helicopter being measured as an aeroplane.
+_register("R", """
     A109 A119 A139 A169 A189 AS32 AS50 AS55 AS65 B06 B06T B222 B230 B407 B412 B427
     B429 B430 B505 BK17 EC20 EC25 EC30 EC35 EC45 EC55 EC75 H500 H60 MD52 MD60 MD90H
-    R66 S64 S76 S92 UH1 S61 S70
+    R66 S64 S76 S92 UH1 S61 S70 R22 R44 EN28 H269 S269 SCHW
 """)
-_register("P", "R22 R44 EN28 H269 S269 SCHW")
 
 
 def engine_class_for_type(type_code: str | None, category: str | None = None) -> str | None:
@@ -81,7 +96,10 @@ def engine_class_for_type(type_code: str | None, category: str | None = None) ->
     code = (type_code or "").strip().upper()
     if code in _ENGINE_CLASS_BY_TYPE:
         return _ENGINE_CLASS_BY_TYPE[code]
-    if (category or "").strip().upper() in {"A3", "A4", "A5"}:
+    cat = (category or "").strip().upper()
+    if cat == "A7":
+        return "R"      # the one category that names an airframe kind rather than a size
+    if cat in {"A3", "A4", "A5"}:
         return "J"      # large, high-vortex-large and heavy are transports: jets in practice
     return None
 
@@ -109,7 +127,8 @@ class Track:
 
     @property
     def is_jet(self) -> bool:
-        return (self.engine_class or "").upper() in JET_CLASSES
+        """No propeller comb to find: a turbofan or a rotorcraft. Still a join candidate."""
+        return (self.engine_class or "").upper() in NON_PROPELLER_CLASSES
 
     def __len__(self) -> int:
         return self.times.size
@@ -134,7 +153,18 @@ class PassGeometry:
     audible_window: tuple[float, float]
     bearing_deg: float = float("nan")
     elevation_deg: float = float("nan")
+    engine_class: str | None = None
     track: Track | None = None
+
+    @property
+    def expected_audible(self) -> bool:
+        """Whether failing to hear this track says anything about the instrument.
+
+        A turbofan has no comb and a rotorcraft does not fly the straight pass the model
+        inverts, so a miss on either measures nothing and must stay out of the detection-rate
+        denominator. It is still a legitimate join candidate -- see `NON_PROPELLER_CLASSES`.
+        """
+        return (self.engine_class or "").upper() not in NON_PROPELLER_CLASSES
 
     @property
     def transition_s(self) -> float:
@@ -202,6 +232,7 @@ def pass_geometry(
         audible_window=(t_cpa + d / c - half, t_cpa + d / c + half),
         bearing_deg=bearing,
         elevation_deg=elevation,
+        engine_class=track.engine_class,
         track=track,
     )
 
@@ -211,14 +242,26 @@ def audible_candidates(
     receiver: geo.Receiver,
     max_slant_m: float | None = None,
     min_speed_mps: float = 30.0,
-    exclude_jets: bool = True,
+    exclude_jets: bool = False,
     c: float = 343.0,
 ) -> list[PassGeometry]:
-    """Tracks that *should* have been audible -- the reverse half of the join.
+    """Every aircraft inside the audibility radius -- the reverse half of the join.
 
     This is what makes an unexplained detection interpretable and what measures detection
     probability against range. Without it you cannot tell a non-transmitting aircraft from one
     you simply failed to hear.
+
+    `exclude_jets` now defaults to False, which is a deliberate reversal. It conflated two
+    questions that pull in opposite directions:
+
+    * *What could this detection be?* Everything overhead, jets included. A detection the
+      detector made on a turbofan must be able to find its own track, or it is published as a
+      non-cooperative aircraft -- the one claim this instrument cannot afford to get wrong.
+    * *Does this miss count against us?* Propeller aeroplanes only. Use
+      `PassGeometry.expected_audible`, which `store.detection_rate` applies to both halves of
+      the ratio.
+
+    Filtering here answered the first question with the second one's answer.
     """
     max_slant_m = physics.AUDIBILITY_RADIUS_M if max_slant_m is None else max_slant_m
     out = []

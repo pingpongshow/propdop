@@ -66,9 +66,16 @@ class JoinResult:
 
         The quantity that makes `unexplained` mean something: if this is 0.4, then four in ten
         silent passes are expected and an unexplained detection is weak evidence.
+
+        Counts propeller aeroplanes only, on both halves. Jets and rotorcraft are legitimate
+        join candidates but have no comb for this detector to find, so neither a hit nor a
+        miss on one says anything about the instrument. `store.detection_rate` applies the
+        same rule in SQL; they must not disagree.
         """
-        total = len(self.matches) + len(self.unheard)
-        return len(self.matches) / total if total else float("nan")
+        heard = sum(1 for m in self.matches if m.geometry.expected_audible)
+        missed = sum(1 for g in self.unheard if g.expected_audible)
+        total = heard + missed
+        return heard / total if total else float("nan")
 
     def summary(self) -> dict:
         return {

@@ -64,11 +64,28 @@ def _analysis_worker(payload: dict):
     aircraft = [d for d in dets if d.is_aircraft]
     tracks = _adsb.tracks_from_readsb(payload["snapshots"])
     geoms = _adsb.audible_candidates(tracks, rx)
-    result = _associate.join(aircraft, geoms)
+
+    # Join FIRST, screen second. `plausible_aircraft` used to run here, before the join, so a
+    # detection ADS-B could have identified was discarded on a self-assessed fit residual
+    # before ADS-B was ever consulted -- and `fit.py` says of that gate "for the ADS-B-
+    # triggered path this is only a sanity check; for the blind path it is the product".
+    #
+    # Measured on a retained clip: a Cirrus SR22T stored as "poor fit (epsilon 3.13%)" refits
+    # to 66.5 m/s at 1791 m against ADS-B truth of 66.3 m/s at 1835 m -- chi 0.11 against a
+    # threshold of 3.0, discarded while sitting 0.03 points from passing the epsilon gate.
+    # Epsilon measures how well the model fits what it was shown, not whether the geometry is
+    # right; chi against a known trajectory measures the latter directly and is the better
+    # evidence wherever it exists.
+    #
+    # So screening now gates only `unexplained`, which is the product it was written for: a
+    # detection with no ADS-B counterpart, where nothing else can vouch for it.
+    result = _associate.join(dets, geoms, aircraft_only=False)
+    result.unexplained = [d for d in result.unexplained if d.is_aircraft]
     return {
         "result": result,
         "n_detections": len(dets),
         "n_aircraft": len(aircraft),
+        "n_matched_screened_out": sum(1 for m in result.matches if not m.detection.is_aircraft),
         "n_tracks": len(tracks),
         "n_candidates": len(geoms),
         # Carried back so the parent can score its own (window-clamped) unheard list.
@@ -80,6 +97,9 @@ def _analysis_worker(payload: dict):
              "f0": float(d.f0), "speed": float(d.speed), "cpa_m": float(d.cpa_distance)}
             for d in dets
         ],
+        # Before the parent's dedup, so a candidate that joined is never also filed as a
+        # near miss -- it is a pass.
+        "matched_t0": [float(m.detection.t0_heard) for m in result.matches],
         "score_times": diag.get("times"),
         "score_best": diag.get("best_score"),
         "peak_score": diag.get("peak_score"),
@@ -466,7 +486,11 @@ class Pipeline:
             (g.icao24, round(g.t_heard_cpa, 1)): detect.best_score_near(diag, g.t_heard_cpa)
             for g in result.unheard
         }
-        rejected = [c for c in (out.get("candidates") or []) if not c["is_aircraft"]]
+        matched_t0 = {round(t, 2) for t in (out.get("matched_t0") or [])}
+        rejected = [
+            c for c in (out.get("candidates") or [])
+            if not c["is_aircraft"] and round(c["t0"], 2) not in matched_t0
+        ]
         unheard_reasons = {}
         for g in result.unheard:
             near = [c for c in rejected

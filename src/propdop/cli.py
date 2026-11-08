@@ -129,7 +129,10 @@ def cmd_ingest(args) -> int:
     if args.adsb and rx is not None:
         geoms = adsb.audible_candidates(adsb.load_readsb_dir(args.adsb), rx)
 
-    result = associate.join(dets, geoms)
+    # Join first, screen second -- the same order the daemon uses (see `pipeline`), so a
+    # recording analysed by hand and the same audio heard live cannot disagree.
+    result = associate.join(dets, geoms, aircraft_only=False)
+    result.unexplained = [d for d in result.unexplained if d.is_aircraft]
     counts = db.record_join(station_id, result, blade_counts=db.infer_blade_counts())
     print(
         json.dumps(

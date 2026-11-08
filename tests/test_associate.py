@@ -52,14 +52,48 @@ def test_pass_geometry_survives_position_jitter():
     assert noisy.speed_mps == pytest.approx(clean.speed_mps, rel=0.15)
 
 
-def test_jets_and_distant_traffic_are_not_expected_to_be_audible():
+def test_distant_traffic_is_not_a_candidate_but_a_jet_overhead_still_is():
+    """The two questions the candidate list used to answer with one filter.
+
+    Range is about whether the aircraft could be heard at all, so it removes a track from
+    consideration entirely. Engine type is about whether a *miss* means anything, which is a
+    question for the denominator -- and answering it here left a detection the detector really
+    did make on a turbofan with no track to match, so it was published as a non-cooperative
+    aircraft instead.
+    """
     jet = adsb.synthetic_track(
-        RX, 240, 9000, 8800, t_cpa=100.0, icao24="jet001", engine_class="J"
+        RX, 240, 3000, 2800, t_cpa=100.0, icao24="jet001", engine_class="J"
+    )
+    heli = adsb.synthetic_track(
+        RX, 50, 1500, 1300, t_cpa=150.0, icao24="heli01", engine_class="R"
     )
     far = adsb.synthetic_track(RX, 90, 12000, 11000, t_cpa=200.0, icao24="far001")
     near = adsb.synthetic_track(RX, 90, 2000, 1800, t_cpa=300.0, icao24="near01")
-    cands = adsb.audible_candidates([jet, far, near], RX)
-    assert [g.icao24 for g in cands] == ["near01"]
+    cands = adsb.audible_candidates([jet, heli, far, near], RX)
+
+    # out of range is out of the join entirely; engine type never is
+    assert [g.icao24 for g in cands] == ["jet001", "heli01", "near01"]
+    # but only the propeller aeroplane may be counted as a miss
+    assert [g.icao24 for g in cands if g.expected_audible] == ["near01"]
+
+
+def test_a_matched_jet_is_in_neither_half_of_the_detection_rate():
+    """Excluding jets from the denominator while counting them in the numerator would score
+    the instrument on exactly the traffic it cannot measure."""
+    import propdop.store as store_mod
+
+    db = store_mod.Store(":memory:")
+    jet = adsb.synthetic_track(
+        RX, 240, 3000, 2800, t_cpa=100.0, icao24="jet001", engine_class="J"
+    )
+    prop = adsb.synthetic_track(
+        RX, 90, 2000, 1800, t_cpa=300.0, icao24="prop01", engine_class="P"
+    )
+    geoms = adsb.audible_candidates([jet, prop], RX)
+    for g in geoms:
+        db.add_unheard("s", g)
+    assert db.detection_rate() == 0.0          # one propeller missed, jet not counted
+    assert db.query_one("SELECT COUNT(*) FROM unheard")[0] == 2   # both still recorded
 
 
 # --------------------------------------------------------------------------------------
