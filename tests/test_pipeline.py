@@ -364,3 +364,26 @@ def test_spectrogram_is_skipped_when_unconfigured_and_never_fatal(tmp_path):
         assert p.stats["last_error"] is None
     finally:
         p.stop()
+
+
+def test_station_hardware_reaches_the_database(tmp_path):
+    """geo.Receiver carries only geometry, so the rest of the config must be passed explicitly.
+
+    The deployed station recorded a null microphone and windscreen for its entire first run
+    while both sat in its config file. That is provenance: `export_reports` ships the station
+    record, so a shared report would have described the hardware as unknown.
+    """
+    cfg = make_config(tmp_path, station_meta={
+        "microphone": "USB PnP Sound Device", "windscreen": "foam",
+        "spl_calibrated": False, "notes": "outside a window",
+        "station_id": "ignored", "lat": 99.0,     # must not be able to override geometry
+    })
+    p = pipeline.Pipeline(cfg, source=node.SyntheticSource(np.zeros(8000), nominal_rate=8000))
+    try:
+        row = p.db.query_one("SELECT * FROM stations WHERE station_id = ?", ("home",))
+        assert row["microphone"] == "USB PnP Sound Device"
+        assert row["windscreen"] == "foam"
+        assert row["notes"] == "outside a window"
+        assert row["station_id"] == "home" and row["lat"] == pytest.approx(RX.lat)
+    finally:
+        p.stop()

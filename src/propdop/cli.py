@@ -54,6 +54,20 @@ def _station_from_config(path: Path | None) -> geo.Receiver | None:
     )
 
 
+def _station_meta(path: Path | None) -> dict:
+    """The non-geometric half of the station config.
+
+    `geo.Receiver` deliberately carries only geometry, so these have to be read separately or
+    they are silently dropped: the deployed station recorded a null microphone and windscreen
+    for its whole first run despite both being in its config file.
+    """
+    if path is None or not path.exists():
+        return {}
+    cfg = json.loads(path.read_text())
+    keep = ("microphone", "windscreen", "spl_calibrated", "ground_sources", "notes")
+    return {k: cfg[k] for k in keep if k in cfg}
+
+
 def cmd_detect(args) -> int:
     samples, rate = _load_audio(args.audio)
     dets = detect.detect(
@@ -154,7 +168,8 @@ def cmd_run(args) -> int:
     """The long-running pipeline: capture, detect, join, store. What the container runs."""
     from . import pipeline
 
-    rx = _station_from_config(Path(args.station) if args.station else data_path("config", "station.json"))
+    station_cfg = Path(args.station) if args.station else data_path("config", "station.json")
+    rx = _station_from_config(station_cfg)
     if rx is None:
         raise SystemExit(
             "no station config. Write config/station.json with lat, lon, elevation_msl_m and"
@@ -163,6 +178,7 @@ def cmd_run(args) -> int:
     cfg = pipeline.PipelineConfig(
         station=rx,
         station_id=rx.name,
+        station_meta=_station_meta(station_cfg),
         db_path=args.db or str(data_path("db", "passes.sqlite")),
         alsa_device=args.device,
         sample_rate=args.rate,

@@ -83,6 +83,10 @@ class PipelineConfig:
     station: geo.Receiver
     db_path: str
     station_id: str = "node"
+    # Hardware provenance from the station config. `geo.Receiver` carries only geometry, so
+    # without this the microphone, windscreen and calibration state never reach the database
+    # and every exported report describes its station as having unknown hardware.
+    station_meta: dict = field(default_factory=dict)
     alsa_device: str = "plughw:0,0"
     sample_rate: int = 48000
     archive_rate: int = 8000
@@ -131,8 +135,17 @@ class Pipeline:
             start_time=time.time(),
         )
         self.db = store.Store(config.db_path)
+        # Geometry comes from the Receiver, which is authoritative; a config that also
+        # carries lat/lon must not be able to override it through this back door.
+        _geometry = {"station_id", "lat", "lon", "elevation_msl_m", "geoid_offset_m"}
+        meta = {
+            k: v for k, v in (config.station_meta or {}).items()
+            if k in store.Station.__dataclass_fields__ and k not in _geometry
+        }
         self.db.add_station(
-            store.Station.from_receiver(config.station, station_id=config.station_id)
+            store.Station.from_receiver(
+                config.station, station_id=config.station_id, **meta
+            )
         )
         self._snapshots: list[dict] = []
         self._lock = threading.Lock()
