@@ -334,7 +334,17 @@ def detect(
     for det in out:
         dup = False
         for keep in merged:
-            window = 0.6 * max(keep.cpa_distance / max(keep.speed, 1.0), 10.0)
+            # One d/v, not 0.6 of it. A flyby's Doppler transition spans about d/v either side
+            # of CPA, so a second lock on the same pass -- typically on the receding tail,
+            # where the tone has swept well below f0 -- lands anywhere in that span. At 0.6 a
+            # duplicate of a 90 m/s pass at 2 km escaped by 0.7 s and was reported as a
+            # second aircraft at 34 m/s.
+            #
+            # That duplicate was invisible for as long as MIN_AIRCRAFT_SPEED sat at 35.8,
+            # which rejected it as "too slow" -- a gate masking a bug in a different stage.
+            # Lowering the floor to 30.0 surfaced it, which is the argument for having both
+            # the synthetic scene test and the corpus: neither alone would have shown this.
+            window = 1.0 * max(keep.cpa_distance / max(keep.speed, 1.0), 10.0)
             if abs(det.t0_heard - keep.t0_heard) < window:
                 ratio = det.f0 / keep.f0 if keep.f0 > 0 else 0.0
                 if 0.45 <= ratio <= 2.2:
@@ -359,18 +369,38 @@ def detect(
 # A pass is heard over roughly d/v seconds, and the acoustic CPA time carries both fit error
 # and an unknown station clock offset early in a run, so the search for "did we score anything
 # where ADS-B said to look" has to be a window rather than a sample.
+# Fallback only, for a score asked for without a geometry. Prefer the pass's own
+# `audible_window`: a fixed tolerance contradicts the instrument's own physics. A slow
+# aircraft at 3.8 km is audible for +/-248 s by `adsb.pass_geometry`, and scoring it over
+# +/-25 s read the quiet 50 seconds around CPA and filed "nothing tonal" while a comb scoring
+# 37.8 sat 128 s away -- for an aircraft the operator could hear perfectly well.
 SCORE_WINDOW_S = 25.0
 
 
 def best_score_near(
-    diagnostics: dict, t: float, tolerance_s: float = SCORE_WINDOW_S
+    diagnostics: dict,
+    t: float,
+    tolerance_s: float = SCORE_WINDOW_S,
+    window: tuple[float, float] | None = None,
 ) -> float:
-    """Peak template score within `tolerance_s` of `t`; NaN if that time was not analysed."""
+    """Peak template score while a pass was audible; NaN if that time was not analysed.
+
+    `window` is the pass's own `audible_window` and is what callers should pass: it is derived
+    from `d/v`, so it stretches for a slow or distant aircraft exactly when a fixed tolerance
+    would fall short. `tolerance_s` remains for callers with a bare timestamp.
+
+    This answers "was anything tonal while this aircraft was overhead", not "was this aircraft
+    heard". Only the join can answer the second, because only it checks that the tone's
+    geometry matches the track's.
+    """
     times = np.asarray(diagnostics.get("times") if diagnostics else (), dtype=float)
     best = np.asarray(diagnostics.get("best_score") if diagnostics else (), dtype=float)
     if times.size == 0 or best.size != times.size:
         return float("nan")
-    sel = (np.abs(times - t) <= tolerance_s) & np.isfinite(best)
+    if window is not None:
+        sel = (times >= window[0]) & (times <= window[1]) & np.isfinite(best)
+    else:
+        sel = (np.abs(times - t) <= tolerance_s) & np.isfinite(best)
     return float(best[sel].max()) if np.any(sel) else float("nan")
 
 

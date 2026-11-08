@@ -481,9 +481,26 @@ class Pipeline:
         ]
 
         # Score every negative where ADS-B said to look, so "not detected" carries a number.
+        #
+        # Over the pass's own timescale, not a fixed tolerance and not its full
+        # `audible_window`. A fixed +/-25 s read the quiet seconds around CPA and filed
+        # "nothing tonal" for an aircraft the operator heard plainly. But `audible_window` is
+        # 3*d/v, which at real geometries here is 440-660 s -- wider than the 420 s analysis
+        # window, so the best score inside it would be the loudest thing in the whole analysis
+        # and would say nothing about *this* aircraft.
+        #
+        # The attributable scale is the Doppler transition itself, about d/v: a tone belonging
+        # to this pass has its own CPA within roughly that of the aircraft's. Floored at
+        # SCORE_WINDOW_S so a fast close pass still gets a usable span.
+        def _score_window(g):
+            half = max(g.transition_s, detect.SCORE_WINDOW_S)
+            return (g.t_heard_cpa - half, g.t_heard_cpa + half)
+
         diag = {"times": out.get("score_times"), "best_score": out.get("score_best")}
         unheard_scores = {
-            (g.icao24, round(g.t_heard_cpa, 1)): detect.best_score_near(diag, g.t_heard_cpa)
+            (g.icao24, round(g.t_heard_cpa, 1)): detect.best_score_near(
+                diag, g.t_heard_cpa, window=_score_window(g)
+            )
             for g in result.unheard
         }
         matched_t0 = {round(t, 2) for t in (out.get("matched_t0") or [])}
@@ -493,8 +510,8 @@ class Pipeline:
         ]
         unheard_reasons = {}
         for g in result.unheard:
-            near = [c for c in rejected
-                    if abs(c["t0"] - g.t_heard_cpa) <= detect.SCORE_WINDOW_S]
+            lo, hi = _score_window(g)
+            near = [c for c in rejected if lo <= c["t0"] <= hi]
             if near:
                 unheard_reasons[(g.icao24, round(g.t_heard_cpa, 1))] = max(
                     near, key=lambda c: c["score"]

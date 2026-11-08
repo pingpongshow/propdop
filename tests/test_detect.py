@@ -225,3 +225,35 @@ def test_diagnostics_peak_where_a_real_pass_is():
     assert on_pass > detect.MIN_TEMPLATE_SCORE
     assert on_pass > off_pass
     assert detect.score_verdict(on_pass) == "scored, screened out"
+
+def test_a_pass_is_scored_over_its_own_timescale():
+    """A fixed tolerance contradicts the instrument's own physics, and said so on the dashboard.
+
+    The pipeline scores each pass over +/-d/v, its Doppler transition. For a slow aircraft at
+    3.8 km that is +/-83 s, against the +/-25 s this used to assume -- which read the quiet
+    seconds around CPA and filed "nothing tonal" for an aircraft the operator heard plainly.
+
+    Note the window is NOT `audible_window` (3*d/v): at real geometries that runs 440-660 s,
+    wider than the 420 s analysis, so it would report the loudest thing anywhere and say
+    nothing about this aircraft.
+    """
+    t_cpa = 1000.0
+    times = np.arange(700.0, 1300.0, 2.0)
+    best = np.full(times.size, 8.7)
+    best[np.argmin(np.abs(times - (t_cpa + 60.0)))] = 37.8    # the real arrival
+    diag = {"times": times, "best_score": best}
+
+    assert detect.best_score_near(diag, t_cpa) == pytest.approx(8.7)
+    assert detect.score_verdict(detect.best_score_near(diag, t_cpa)) == "nothing tonal"
+
+    transition = (t_cpa - 83.0, t_cpa + 83.0)          # d/v for 3.8 km at 45.7 m/s
+    assert detect.best_score_near(diag, t_cpa, window=transition) == pytest.approx(37.8)
+    assert detect.best_score_near(diag, t_cpa, window=transition) > detect.MIN_TEMPLATE_SCORE
+
+
+def test_scoring_window_still_reports_unanalysed_time_as_nan():
+    """A window outside the analysed span must stay NaN, not collapse to a low score: 'not
+    analysed' and 'analysed and quiet' are different claims about the instrument."""
+    diag = {"times": np.arange(0.0, 100.0, 2.0), "best_score": np.full(50, 12.0)}
+    assert np.isnan(detect.best_score_near(diag, 5000.0, window=(4900.0, 5100.0)))
+    assert detect.score_verdict(float("nan")) == "not analysed"
