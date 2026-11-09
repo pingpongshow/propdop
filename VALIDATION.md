@@ -689,3 +689,89 @@ is an assumption, and validating it against noise generated from that same assum
 nothing.** The synthetic check was not weak — it swept five jitter levels, straight and
 turning tracks, sixteen seeds each — and it could not have failed, because every sample it drew
 was independent and Gaussian by construction. What found this was a log file.
+
+## What the fifth review found
+
+The fifth review asked one question: had the per-axis smoothing fix ended the `s too small`
+warning? The log said two occurrences, both before the restart, and none after. That reading
+was wrong twice over, and the way it was wrong matters more than the answer.
+
+**A log cannot measure a warning's rate.** Python prints a given warning once per process per
+message text and then goes silent, however often it recurs. So the counts that looked like
+rates were counts of *process starts*: the twenty-six occurrences in the journal came from
+fourteen PIDs, and the same PID appears twice only because FITPACK has two wordings for this
+failure. The fourth review read "4 in 2.5 h" as a rate; the fifth read "none since the
+restart" as "fixed". Neither number meant what it was taken to mean.
+
+**And the second wording was being missed entirely.** FITPACK reports this as either
+`A theoretically impossible result ... : s too small` or `The maximal number of iterations
+maxit ... has been reached: s\ntoo small` — and in the second the phrase wraps across a line
+break, so a `grep "s too small"` finds the first and not the second. Seventeen of the
+twenty-six occurrences were the wording the check could not see. The project's own test for
+this already normalised the newline before matching; only the shell command used during the
+review did not. The lesson from the fourth review was that a synthetic check can be
+unfalsifiable. This one is narrower and sharper: **the instrument that reads the evidence is
+part of the experiment, and a grep is an instrument.**
+
+So the warning is now counted in the code, where the suppression cannot reach, and published
+with the other health counters as `spline_nonconvergence`. `_smooth_enu` runs in two processes
+— the analysis worker and the main loop — so the worker hands its count back rather than
+letting it die with the process.
+
+### The smoothing rules, A/B'd on live tracks
+
+One hundred tracks captured from the live feed, every track run through each rule with the
+warning filter forced to `always` so nothing is suppressed:
+
+| smoothing rule | tracks tripping FITPACK |
+|---|---|
+| `s = 4n` (original) | 3 / 100 |
+| one σ for all three axes (first fix) | 0 / 100 |
+| per-axis σ, 2.2 m floor (deployed) | 0 / 100 |
+| σ fixed at 10 m | 0 / 100 |
+
+The deployed rule is better than the original, which is the question that was asked. It is not
+perfect — the station logged one occurrence in eighteen analyses after the restart — but the
+rate is now measured rather than inferred from a silence.
+
+### The estimator measures the flight path, not the noise
+
+The more serious finding is underneath that table. `_position_sigma_m` assumes "a trajectory is
+smooth, so its second difference is near zero and what remains is noise". At the interval this
+feed is polled, that is false. For constant acceleration the second difference is exactly
+`a·dt²`, and a 100 m/s aircraft on a 5 km turn radius pulls 2 m/s², which is 500 m at
+`dt` = 16 s against a true position error near 10 m.
+
+Measured against known noise on synthetic tracks that *manoeuvre* — the case the fourth
+review's sweep did not cover, because its turning tracks were sampled finely enough for the
+assumption to hold:
+
+| case (26 samples, true noise 10 m) | σ returned |
+|---|---|
+| straight and level, dt = 16 s | 10.8 m |
+| 3 km turn radius, dt = 16 s | 115 m |
+| 5 km turn radius, dt = 16 s | 197 m |
+| 5 km turn radius, dt = 30 s | 719 m |
+
+And on live traffic the horizontal estimate ran to a median of **52 m**, a 90th percentile of
+389 m, and a maximum of 1300 m, with **28 of 158 axes pinned at the 200 m ceiling**. The
+ceiling is not a safety margin; it is the only thing standing between the spline and a
+trajectory smoothed by a kilometre. Third differences, which annihilate constant acceleration,
+cut the error from a median of 1285 % to 166 % — better, and still not a measurement, because a
+turn is not a quadratic.
+
+Two consequences, stated separately because they differ in size:
+
+* **It does not explain the slant bias.** Re-running every bracketed CPA with σ forced to 10 m
+  moves the ADS-B slant by a median of **+0.05 %** (mean +0.04 %). Over-smoothing was the third
+  hypothesis for the −22 % slant bias to be tested and the third to fail, after the octave slip
+  and the held positions.
+* **It does cost speed.** The same comparison moves the ADS-B speed by a mean of −4.4 %, and up
+  to −14.5 % on an individual track. That lands on the side of the join used as truth, against
+  a `SIGMA_SPEED_FRAC` of 10 %.
+
+The honest conclusion is not that a better estimator is needed but that **this quantity is not
+identifiable from this data**: between two samples 16 s apart, a manoeuvring aircraft's own
+curvature exceeds its position error by more than an order of magnitude, so no estimator
+recovers the noise from the track alone. The feed's documented accuracy — NACp horizontal, and
+25 ft / √12 vertical for the quantisation — is a known quantity where the measured one is not.

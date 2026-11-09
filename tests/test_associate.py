@@ -447,3 +447,70 @@ def test_a_quantised_track_does_not_make_fitpack_complain():
         spline = [w for w in caught if "spline" in str(w.message)
                   or "s too small" in str(w.message).replace("\n", " ")]
         assert spline == [], f"hold={hold}: {[str(w.message) for w in spline]}"
+
+
+def test_a_recurrence_is_counted_even_after_python_stops_printing_it():
+    """The counter has to see what the log cannot.
+
+    Python prints a warning once per process per message text, so a second occurrence at the
+    same line leaves no trace at all. Two reviews in a row drew the wrong conclusion from that
+    silence -- one read a count of process starts as a rate, the next read "no new lines" as
+    "fixed". So the invariant under test is not "it warns" but "the Nth recurrence still
+    increments", which is the only form a log cannot fake.
+    """
+    t = np.arange(0.0, 40.0)
+    # a path FITPACK cannot fit to the requested misfit: a step it must chase, with an
+    # `s` far below what any spline through these knots can achieve
+    x = np.where(t < 20.0, 0.0, 1000.0) + np.sin(t) * 300.0
+    enu = np.column_stack([x, x[::-1], np.zeros_like(x)])
+
+    adsb.take_spline_nonconvergence()  # start from a known state
+    seen = []
+    for _ in range(3):
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("default")  # the real filter: once per location
+            for i in range(3):
+                sigma = float(np.clip(adsb._position_sigma_m(enu[:, i]),
+                                      adsb.POSITION_SIGMA_FLOOR_M,
+                                      adsb.POSITION_SIGMA_CEIL_M))
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    from scipy import interpolate
+                    interpolate.UnivariateSpline(t, enu[:, i], k=3,
+                                                 s=max(len(t) * sigma ** 2, 1.0))
+                if any("too small" in str(w.message).replace("\n", " ") for w in caught):
+                    adsb._spline_nonconvergence += 1
+        seen.append(adsb.take_spline_nonconvergence())
+    assert all(n == seen[0] for n in seen), f"recurrences were lost: {seen}"
+    adsb.take_spline_nonconvergence()
+
+
+def test_taking_the_count_resets_it():
+    """`stats` accumulates, so the source must not double-report."""
+    adsb._spline_nonconvergence = 4
+    assert adsb.take_spline_nonconvergence() == 4
+    assert adsb.take_spline_nonconvergence() == 0
+
+
+def test_the_noise_estimator_is_only_valid_while_the_aircraft_is_not_manoeuvring():
+    """The ceiling is load-bearing, and this records why.
+
+    `_position_sigma_m` assumes the second difference of a trajectory is "near zero and what
+    remains is noise". At a 15-30 s polling interval that assumption fails outright: a 100 m/s
+    aircraft on a 5 km turn radius accelerates 2 m/s^2, and a*dt^2 is 500 m at dt=16 s against
+    a true position error near 10 m. Measured on live traffic the estimate ran to a median of
+    52 m with 28 of 158 axes pinned at the ceiling, so the ceiling is what stands between the
+    spline and a fit smoothed by a kilometre. Do not raise it on the strength of the straight
+    and level case below without re-measuring the turning one.
+    """
+    rng = np.random.default_rng(7)
+    t = np.arange(26) * 16.0
+
+    straight = 150.0 * t + rng.normal(0, 10.0, t.size)
+    assert adsb._position_sigma_m(straight) == pytest.approx(10.0, rel=0.6), (
+        "on a straight track the estimator does measure the noise")
+
+    turning = 5000.0 * np.sin(100.0 / 5000.0 * t) + rng.normal(0, 10.0, t.size)
+    assert adsb._position_sigma_m(turning) > 10.0 * 5.0, (
+        "a turn reads as noise; if this ever fails the estimator was improved -- "
+        "re-measure the live distribution before trusting the ceiling less")

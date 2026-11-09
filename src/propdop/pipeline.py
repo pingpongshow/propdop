@@ -88,6 +88,9 @@ def _analysis_worker(payload: dict):
         "n_matched_screened_out": sum(1 for m in result.matches if not m.detection.is_aircraft),
         "n_tracks": len(tracks),
         "n_candidates": len(geoms),
+        # The worker is a separate process, so its counter is its own; hand it back rather
+        # than leaving it to die with the process.
+        "n_spline_nonconvergence": _adsb.take_spline_nonconvergence(),
         # Carried back so the parent can score its own (window-clamped) unheard list.
         # Every candidate with its screening verdict, so a stored negative can say *why* a
         # scoring candidate was rejected rather than only that one existed.
@@ -217,6 +220,7 @@ class Pipeline:
             "analysis_duration_s": None,
             "analysis_overruns": 0,
             "coverage_gaps": 0,
+            "spline_nonconvergence": 0,
             "last_error": None,
             "adsb_backoff": 1.0,
         }
@@ -654,10 +658,17 @@ class Pipeline:
             )
 
         self.stats["analyses"] += 1
+        # Both halves: the worker's, handed back through `out`, and this process's own, which
+        # `overhead()` accrues between analyses.
+        self.stats["spline_nonconvergence"] += (
+            out.get("n_spline_nonconvergence", 0) + adsb.take_spline_nonconvergence()
+        )
         self.stats["passes_stored"] += counts["matched"] + counts["unexplained"]
         self.stats["unheard_stored"] += counts["unheard"]
         self.stats["last_analysis"] = time.time()
         self.stats["last_peak_score"] = out.get("peak_score")
+        self.stats["last_audible_candidates"] = out["n_candidates"]
+        self.stats["last_adsb_tracks"] = out["n_tracks"]
         self._write_status()
         return {
             "window_start": t_offset,

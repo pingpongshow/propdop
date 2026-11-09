@@ -8,6 +8,7 @@ infers it from the data.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -190,6 +191,30 @@ class PassGeometry:
         return self.slant_cpa_m / max(self.speed_mps, 1e-6)
 
 
+# Splines FITPACK could not fit to the requested smoothing, since the last `take_...` call.
+#
+# This counter exists because the *log* cannot answer "is it still happening?". Python prints a
+# given warning once per process per message text, so after the first occurrence the process
+# goes quiet no matter how often it recurs -- and a review of the logs then cannot tell a fix
+# from a suppression. That is not hypothetical: the fourth review read "4 occurrences in 2.5 h"
+# as a rate when it was really a count of process starts, and the fifth read "2 since the
+# restart" as "zero new" while the grep pattern was silently missing the other wording FITPACK
+# uses ("maxit ... reached: s\ntoo small", which wraps across lines). Count it in the code,
+# where the suppression cannot reach, and publish it with the other health counters.
+_spline_nonconvergence = 0
+
+
+def take_spline_nonconvergence() -> int:
+    """Read and zero the non-convergence count.
+
+    Per *process*: `_smooth_enu` runs both in the analysis worker and in the main loop, so the
+    caller is responsible for collecting both (see `pipeline`).
+    """
+    global _spline_nonconvergence
+    n, _spline_nonconvergence = _spline_nonconvergence, 0
+    return n
+
+
 def _position_sigma_m(x: NDArray[np.float64]) -> float:
     """Per-sample position noise along one axis, from the scatter of second differences.
 
@@ -256,12 +281,20 @@ def _smooth_enu(track: Track, receiver: geo.Receiver):
     # the median across the three applied one axis's noise to another, in both directions --
     # measured on live traffic, one track had 0.05 m east and 9.2 m north, another 50 m east
     # and 1.1 m up. Each axis gets its own spline anyway, so each gets its own `s`.
+    global _spline_nonconvergence
     out = []
     for i in range(3):
         sigma = float(np.clip(_position_sigma_m(enu[:, i]),
                               POSITION_SIGMA_FLOOR_M, POSITION_SIGMA_CEIL_M))
-        out.append(interpolate.UnivariateSpline(t, enu[:, i], k=k,
-                                                s=max(len(t) * sigma**2, 1.0)))
+        # `record=True` with "always" bypasses the once-per-process registry, so a recurrence
+        # is counted even after the first one has been printed.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            spline = interpolate.UnivariateSpline(t, enu[:, i], k=k,
+                                                  s=max(len(t) * sigma**2, 1.0))
+        if any("too small" in str(w.message) for w in caught):
+            _spline_nonconvergence += 1
+        out.append(spline)
     return out
 
 
