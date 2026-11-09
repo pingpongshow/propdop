@@ -24,7 +24,8 @@ becomes an over-determined physics measurement.
 | **Propeller RPM** | ≲1 %, i.e. ±5–22 RPM at 2,700 | No public data feed carries RPM |
 | **Aircraft speed** | ~3 % on a steady pass | Checkable against ADS-B every pass |
 | **Wind aloft** | ~1 m/s per good pass | The strong atmospheric product |
-| **Temperature aloft** | ~1.7 °C per good pass | The weak one — needs averaging |
+| **Temperature aloft** | **suppressed** | A measured speed bias lands on it; see VALIDATION.md |
+| **Effective sound speed aloft** | ~1 m/s per good pass | Published in its place — it is what is measured |
 | **Turbulence** | `C²_eff` to 20–30 % per pass | From tonal scintillation; see caveats |
 | **Prop/engine health** | anomaly detection, not diagnosis | Needs months of repeat passes |
 | **Non-cooperative aircraft** | heard but absent from ADS-B | ADS-B Out is not required in US Class G below 10,000 ft |

@@ -48,7 +48,8 @@ From [APPLICATIONS.md](APPLICATIONS.md), where these are derived:
 | **Propeller RPM** | **exactly `ε`** — 0.2–0.8 %, i.e. ±5 to ±22 RPM at 2,700 | `f0 = N_blades·RPM/60`, so `σ_RPM/RPM = σ_f0/f0` |
 | **Prop health** | detection, not a number | rotation-harmonic energy that isn't a BPF multiple |
 | **Path-avg wind** | **~1 m/s per good fast pass**; direction from the 127° bearing sweep | `∂drop/∂c`, APPLICATIONS §6 |
-| **Path-avg temperature** | **~1.7 °C per good fast pass** — needs averaging to be useful | same |
+| **Path-avg temperature** | **not published** — the measured common-mode speed bias lands almost entirely on this parameter, at ~5.8 °C per 1 % of speed error | `atmos.PUBLISH_TEMPERATURE`, VALIDATION.md |
+| **Path-avg effective sound speed** | **~1 m/s per good fast pass** — the quantity actually measured, published in temperature's place | same |
 | **Layer wind / temperature**, 1–2 km | **~0.9 m/s / 1.5 °C per pass → ~0.3 m/s / 0.34 °C over 20 passes** | differencing passes by altitude |
 | **Humidity** (speculative) | uncalibrated | differential harmonic absorption |
 
@@ -547,6 +548,14 @@ for the vertical profile (~1–2 km layers, 0–7 km), weighting by aircraft spe
 aircraft carry ~3× the information. Report **wind first**; temperature only once the pass count in a layer
 justifies it. Every published profile should carry its contributing pass count, because that is what sets
 whether it means anything.
+
+The pass count turned out not to be the binding constraint on temperature. A **common-mode bias in the
+acoustic speed is indistinguishable from a change in the medium**, because the observable is the
+disagreement between the acoustic speed and ADS-B. One exists — −7.5 % over the first 11 matches — and the
+design matrix sends it almost entirely to the isotropic term, which is the one temperature is read from.
+Wind, carried by the `cos(θ−θ_w)` columns, is untouched. So temperature is withheld
+(`atmos.PUBLISH_TEMPERATURE`) and the effective sound speed is published in its place, while wind keeps its
+stated confidence. This inverts the natural assumption that two products from one inversion share a fate.
 
 ## 8. Data products
 

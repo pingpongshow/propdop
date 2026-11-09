@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import __version__, detect, livespec, store
+from . import __version__, atmos, detect, livespec, store
 
 try:  # keep the core import-light; the web extra is optional
     from fastapi import FastAPI, HTTPException, Response
@@ -578,9 +578,23 @@ def _product_rows(db: store.Store) -> list[dict]:
                 f"{_fmt(sounding.temperature_c, 1)} &deg;C "
                 f"&plusmn;{_fmt(sounding.sigma_temperature_c, 1)}"
             )
-            if sounding
-            else "—",
-            "the weak one: the same sigma_c is ~1 m/s of wind but ~1.7 C of temperature",
+            if sounding and atmos.PUBLISH_TEMPERATURE
+            else "<em>suppressed</em>",
+            atmos.TEMPERATURE_SUPPRESSED_REASON
+            if not atmos.PUBLISH_TEMPERATURE
+            else "the weak one: the same sigma_c is ~1 m/s of wind but ~1.7 C of temperature",
+        ),
+        row(
+            "Effective sound speed aloft",
+            n_atmos,
+            20,
+            (
+                f"{_fmt(sounding.c0, 1)} m/s &plusmn;{_fmt(sounding.sigma_c0, 1)}"
+                if sounding
+                else "—"
+            ),
+            "what is actually measured along the path: c(T) plus the wind projection, and the "
+            "quantity the suppressed temperature was inverted from",
         ),
         row(
             "Prop health",
@@ -1141,22 +1155,34 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
                        "qualify.</p>")
             else:
                 prof = db.profile()
+                # The third column is the effective sound speed, not the temperature derived
+                # from it: `atmos.PUBLISH_TEMPERATURE` is off, and the measured quantity is
+                # the one worth showing while the inversion is untrustworthy.
+                def _third(l):
+                    if atmos.PUBLISH_TEMPERATURE:
+                        return (f"{_fmt(l.temperature_c, 1)} &deg;C &plusmn;"
+                                f"{_fmt(l.sigma_temperature_c, 1)}")
+                    return f"{_fmt(l.c0, 1)} m/s &plusmn;{_fmt(l.sigma_c0, 1)}"
+
+                head3 = "temperature" if atmos.PUBLISH_TEMPERATURE else "effective sound speed"
                 rows_h = "".join(
                     (f"<tr><td>{_fmt(l.altitude_lo, 0)}&ndash;{_fmt(l.altitude_hi, 0)} m</td>"
                      f"<td>{l.n}</td><td>{_fmt(l.wind_speed, 1)} m/s from "
                      f"{_fmt(l.wind_bearing_deg, 0)}&deg;</td>"
-                     f"<td>{_fmt(l.temperature_c, 1)} &deg;C &plusmn;"
-                     f"{_fmt(l.sigma_temperature_c, 1)}</td></tr>")
+                     f"<td>{_third(l)}</td></tr>")
                     if l else '<tr><td colspan="4" class="mut">no passes reached this layer</td></tr>'
                     for l in prof.layers
                 )
                 snd = (
                     f'<p>Bulk, {sounding.n} passes: <strong>{_fmt(sounding.wind_speed, 1)} m/s '
                     f'from {_fmt(sounding.wind_bearing_deg, 0)}&deg;</strong>, '
-                    f'{_fmt(sounding.temperature_c, 1)} &deg;C &plusmn;'
-                    f'{_fmt(sounding.sigma_temperature_c, 1)}</p>'
+                    f'effective sound speed {_fmt(sounding.c0, 1)} m/s &plusmn;'
+                    f'{_fmt(sounding.sigma_c0, 1)}</p>'
                     + (f'<p class="warn">{_esc(sounding.note)}</p>' if sounding.note else "")
-                    + "<table><tr><th>layer</th><th>n</th><th>wind</th><th>temperature</th></tr>"
+                    + (f'<p class="warn">Temperature aloft is '
+                       f'{_esc(atmos.TEMPERATURE_SUPPRESSED_REASON)}</p>'
+                       if not atmos.PUBLISH_TEMPERATURE else "")
+                    + f"<table><tr><th>layer</th><th>n</th><th>wind</th><th>{head3}</th></tr>"
                     + rows_h + "</table>"
                 )
 

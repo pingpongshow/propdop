@@ -860,3 +860,25 @@ common-mode offset in `c_eff` projects predominantly onto the constant column, w
 exactly the parameter the temperature is read from. So the published wind survives the bias
 and the published temperature does not — the opposite of a product that should be presented
 with equal confidence.
+
+### What was done about it
+
+Temperature aloft is **withheld**, behind the single flag `atmos.PUBLISH_TEMPERATURE`. The
+inversion is left exactly as it was, because nothing is wrong with it. `as_dict` reports
+`temperature_c` as null rather than dropping the key — a consumer should see that there is no
+value, not a stale one, and should not need to handle a `KeyError` to find out why — alongside
+`temperature_suppressed` carrying the reason. `Sounding.temperature_c` still computes, so the
+implied value stays available to whoever is chasing the bias.
+
+The **effective sound speed** is published in its place, on the dashboard and in the layer
+table. That is the quantity the instrument actually measures: `c(T)` plus the wind projection
+along the path. Attributing it to temperature is the step that is untrustworthy, not the
+measurement.
+
+Wind keeps its stated confidence, and a test now asserts the reason rather than leaving it as
+a claim in a comment: a 25 m/s offset applied to every sample moves `c0` by 25.0 m/s and moves
+the wind vector by less than 0.5 m/s. If that ever stops holding, suppressing temperature
+alone is the wrong remedy.
+
+The row stays visible on the dashboard, labelled suppressed and carrying its reason. A product
+withdrawn silently is worse than one published wrong, because nobody can ask why it went.

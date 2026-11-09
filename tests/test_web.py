@@ -72,6 +72,20 @@ def test_dashboard_states_what_is_not_yet_measurable(client):
     assert "Wind aloft" in body and "Temperature aloft" in body
 
 
+def test_the_dashboard_names_the_temperature_product_and_says_it_is_suppressed(client):
+    """A product withdrawn silently is worse than one published wrong: nobody can ask why.
+
+    The row stays, so the reader sees that the quantity exists and is not being reported, and
+    it carries the reason. The effective sound speed it was inverted from is reported in its
+    place, since that is what the instrument actually measures.
+    """
+    body = client.get("/").text
+    assert "Temperature aloft" in body
+    assert "suppressed" in body
+    assert "Effective sound speed aloft" in body
+    assert "~5.8 C per percent" in body
+
+
 def test_dashboard_reports_the_measured_error_not_the_fit_covariance(client):
     body = client.get("/").text
     assert "Measured error against ADS-B" in body

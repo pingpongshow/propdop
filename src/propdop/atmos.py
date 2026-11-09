@@ -33,6 +33,33 @@ from . import physics
 
 C_ASSUMED = 343.0
 
+# Temperature aloft is solved for but **not published**, and this is the one place that says
+# so. The inversion itself is correct; what feeds it is not.
+#
+# `c_eff_from_speed_bias` reads the medium out of the *disagreement* between the acoustic
+# speed and the ADS-B speed, so any common-mode bias in the acoustic speed is indistinguishable
+# from a change in the medium. One exists and has been measured: over 11 matched passes the
+# fitted speed runs -7.5% (10 of 11 negative) against ADS-B. Around 340 m/s that is ~3.4 m/s
+# of sound speed and ~5.8 C of implied temperature for every 1% of speed error, which put this
+# product at 67 C mean and 198 C worst on a day with a 15.6 C surface -- physically impossible
+# values, published with a confidence label.
+#
+# Wind is deliberately left published. `_design` gives `c0` a constant column and the wind two
+# columns in cos(elevation)cos(bearing - .), so a common-mode offset projects predominantly
+# onto the constant column -- the single parameter the temperature is read from. The bias lands
+# on temperature and leaves the wind vector alone, which inverts the usual expectation that
+# the two products share a confidence.
+#
+# What is restored when the speed bias is understood is this flag. Nothing else here changes.
+# VALIDATION.md carries the measurements.
+PUBLISH_TEMPERATURE = False
+
+TEMPERATURE_SUPPRESSED_REASON = (
+    "suppressed: the measured common-mode speed bias against ADS-B lands almost entirely on "
+    "c0, at ~5.8 C per percent, so this product read 67-198 C against a 15.6 C surface. The "
+    "effective sound speed it is derived from is reported instead. Wind is unaffected."
+)
+
 
 # --------------------------------------------------------------------------------------
 # The observable
@@ -182,8 +209,16 @@ class Sounding:
             "n_passes": self.n,
             "c0_mps": self.c0,
             "sigma_c0_mps": self.sigma_c0,
-            "temperature_c": self.temperature_c,
-            "sigma_temperature_c": self.sigma_temperature_c,
+            # Null rather than absent: a consumer that reads this key should see that there
+            # is no value, not a stale one, and should not have to handle a KeyError to
+            # find out why. The implied value stays available on `temperature_c`.
+            "temperature_c": self.temperature_c if PUBLISH_TEMPERATURE else None,
+            "sigma_temperature_c": (
+                self.sigma_temperature_c if PUBLISH_TEMPERATURE else None
+            ),
+            "temperature_suppressed": (
+                None if PUBLISH_TEMPERATURE else TEMPERATURE_SUPPRESSED_REASON
+            ),
             "wind_speed_mps": self.wind_speed,
             "wind_from_deg": self.wind_bearing_deg,
             "sigma_wind_mps": self.sigma_wind,

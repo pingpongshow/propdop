@@ -179,3 +179,71 @@ def test_profile_layers_carry_their_pass_counts():
 def test_empty_input_is_handled():
     prof = atmos.solve_profile([], [0.0, 1000.0, 2000.0])
     assert prof.n_total == 0 and all(layer is None for layer in prof.layers)
+
+
+def test_the_temperature_product_is_suppressed_but_the_implied_value_is_not_lost():
+    """Suppression is about publication, not about forgetting the number.
+
+    The inversion is correct; what feeds it carries a measured common-mode speed bias that
+    lands almost entirely on `c0`. So the published dict reports no temperature and says why,
+    while `temperature_c` stays available for the diagnosis that found the problem.
+    """
+    assert atmos.PUBLISH_TEMPERATURE is False
+    c = float(physics.sound_speed(15.0))
+    s = atmos.Sounding(c0=c, wind_east=3.0, wind_north=-4.0, n=20, sigma_c0=1.0)
+
+    d = s.as_dict()
+    assert d["temperature_c"] is None
+    assert d["sigma_temperature_c"] is None
+    assert d["temperature_suppressed"] == atmos.TEMPERATURE_SUPPRESSED_REASON
+
+    # the measured quantity the temperature was inverted from is published in its place
+    assert d["c0_mps"] == pytest.approx(c)
+    assert d["sigma_c0_mps"] == pytest.approx(1.0)
+
+    # and the inversion still works, for whoever is debugging the bias
+    assert s.temperature_c == pytest.approx(15.0, abs=0.01)
+
+
+def test_wind_is_published_because_a_common_mode_bias_does_not_reach_it():
+    """The reason temperature is suppressed and wind is not, asserted rather than asserted of.
+
+    `_design` gives `c0` a constant column, so an offset applied to every sample must land
+    there and leave the wind vector where it was. If this ever stops being true, suppressing
+    temperature alone is the wrong remedy.
+    """
+    c0, w_e, w_n = 340.0, 6.0, -3.0
+    clean = atmos.solve_bulk(make_samples(c0, w_e, w_n, n=60, sigma=0.05))
+    biased = atmos.solve_bulk(
+        [
+            atmos.PathSample(
+                c_eff=s.c_eff + 25.0,
+                sigma=s.sigma,
+                bearing_deg=s.bearing_deg,
+                elevation_deg=s.elevation_deg,
+                altitude_m=s.altitude_m,
+            )
+            for s in make_samples(c0, w_e, w_n, n=60, sigma=0.05)
+        ]
+    )
+    assert clean is not None and biased is not None
+    # the whole offset went to c0...
+    assert biased.c0 - clean.c0 == pytest.approx(25.0, abs=0.5)
+    # ...and the wind vector is untouched
+    assert biased.wind_east == pytest.approx(clean.wind_east, abs=0.5)
+    assert biased.wind_north == pytest.approx(clean.wind_north, abs=0.5)
+
+
+def test_restoring_the_temperature_product_is_one_switch():
+    """If the fix for the speed bias lands, nothing but the flag should need changing."""
+    c = float(physics.sound_speed(15.0))
+    s = atmos.Sounding(c0=c, wind_east=0.0, wind_north=0.0, n=20, sigma_c0=1.0)
+    saved = atmos.PUBLISH_TEMPERATURE
+    try:
+        atmos.PUBLISH_TEMPERATURE = True
+        d = s.as_dict()
+        assert d["temperature_c"] == pytest.approx(15.0, abs=0.01)
+        assert d["sigma_temperature_c"] == pytest.approx(1.69, abs=0.05)
+        assert d["temperature_suppressed"] is None
+    finally:
+        atmos.PUBLISH_TEMPERATURE = saved
