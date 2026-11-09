@@ -775,3 +775,44 @@ identifiable from this data**: between two samples 16 s apart, a manoeuvring air
 curvature exceeds its position error by more than an order of magnitude, so no estimator
 recovers the noise from the track alone. The feed's documented accuracy — NACp horizontal, and
 25 ft / √12 vertical for the quantisation — is a known quantity where the measured one is not.
+
+### The comb gate, switched on
+
+Contrast had been computed and reported since the matched filter was written, and deliberately
+*not* gated on. The reason was a measurement, not an oversight: an aircraft at 4 km was detected
+with a matched-filter score of 110 while its per-frame comb contrast sat at zero, so a bare
+threshold on contrast demonstrably discards true positives.
+
+What changed is that 66 live passes now say where the two populations sit — and the overnight
+false positives are not quiet aircraft, they are not combs at all:
+
+| blind detections | n | contrast < 0.20 | mean contrast |
+|---|---|---|---|
+| day, 07–18 | 35 | 6 | 0.858 |
+| **night, 19–06** | **22** | **22** | **0.028** |
+| ADS-B confirmed | 9 | **0** | ≥ 0.43 |
+
+A thirty-fold separation by time of day, and the confirmed matches sit entirely on one side of
+it. 0.20 falls in the natural gap between 0.179 and 0.27, rejects 28 of 57 blind detections
+including every overnight one, and rejects none of the nine matches — a 2.2× margin below the
+lowest. The value that had been sitting unused, 0.35, would have left only 1.24×.
+
+The old objection still stands, so the gate waives itself on a matched-filter score of 80 or
+more. That number is not a guess: every one of the 28 rejected rows scored between 18.0 and
+53.9, and the highest score among all 66 stored passes is 77.7, so the waiver is above
+everything the station has observed and below the 110 of the aircraft that motivated reporting
+contrast rather than gating it. On all the evidence available it costs nothing and preserves a
+case the project had already measured. A caller that offers no score gets the gate unwaived —
+`cli.cmd_fit` fits raw audio with no detector behind it — because absence of the score is not
+evidence for the waiver.
+
+Two structural points. The gate is checked **last** among the physical gates, so "too slow" or
+"transition unresolvable" is preferred wherever it applies: those name what the source is,
+while this one only says the evidence is absent. And it gates `unexplained` only, after the
+ADS-B join, so no confirmed match can be lost to it whatever its contrast — the join runs on
+every detection, and screening touches the blind product alone.
+
+What this does **not** do is explain the overnight detections. It removes them from the
+published product, which is the right call for an instrument whose one unaffordable error is a
+false "non-cooperative aircraft", but a contrast near zero with an epsilon near 2 % is still an
+unexplained signal. It is now filed rather than published.

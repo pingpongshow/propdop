@@ -93,10 +93,14 @@ ordinary rejection. A fifth put a 10–25 % error on the ADS-B *truth* the acous
 measured against. All five are fixed and written up in [VALIDATION.md](VALIDATION.md); what is
 missing is enough matched passes to say what the corrected rate actually is.
 
-Also measured and not yet acted on: `comb_contrast` is at or below 0.15 on twenty of the
-station's thirty-nine stored passes, meaning the harmonic comb there is no stronger than the
-background. `template_score` alone does not separate the two populations — a fit to noise
-outscored three of the four real matches.
+`comb_contrast` is now gated, which it had never been. Across 66 live passes the separation
+turned out to be by time of day rather than by strength: all 22 blind detections between 19:00
+and 06:00 sat below 0.20 contrast, mean 0.028, against a daytime mean of 0.858 — while none of
+the 9 ADS-B-confirmed matches fell below 0.43. The gate is set at 0.20, in the gap between
+0.179 and 0.27, and waives itself on a matched-filter score of 80 to preserve a documented true
+positive at contrast zero. `template_score` alone still does not separate the populations: the
+28 rejected rows and the 9 matches overlap almost completely on score (18.0–53.9 against
+28.0–71.0), which is why the gate is on contrast and the score only lifts it.
 
 Still true: the atmospheric inversion has never run on real passes, and indoors is for proving
 the pipeline rather than producing soundings, since mains hum at 60 Hz sits directly in the

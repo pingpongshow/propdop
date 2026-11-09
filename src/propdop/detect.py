@@ -321,7 +321,9 @@ def detect(
                     det.fit = r
                     det.f0, det.speed = r.f0, r.speed
                     det.cpa_distance, det.t0_heard = r.cpa_distance, r.t0_heard
-                    det.is_aircraft, det.reason = fitmod.plausible_aircraft(r)
+                    det.is_aircraft, det.reason = fitmod.plausible_aircraft(
+                        r, template_score=det.template_score
+                    )
                 except Exception as exc:  # a failed refinement is a rejection, not a crash
                     det.reason = f"refinement failed: {type(exc).__name__}"
         out.append(det)

@@ -810,7 +810,33 @@ DIST_BOUND_HI = 20000.0
 BOUND_MARGIN = 0.02
 SPEED_BOUND_MARGIN = 1.0 - BOUND_MARGIN
 MIN_TRANSITION_S = 5.0
-MIN_COMB_CONTRAST = 0.35
+
+# APPLIED as of the fifth station review, and lowered from 0.35. Contrast was reported and not
+# gated because of a documented true positive: an aircraft at 4 km detected with a
+# matched-filter score of 110 whose per-frame comb contrast sat at zero. That case is real and
+# the objection to a bare gate still stands -- which is why the gate below waives itself on a
+# strong matched-filter score rather than being applied unconditionally.
+#
+# What changed is that 66 live passes now say where the populations sit. Overnight detections
+# are not quiet aircraft; they are not combs at all:
+#
+#   | blind detections | n  | contrast < 0.20 | mean contrast |
+#   |------------------|----|-----------------|---------------|
+#   | day   07-18      | 35 | 6               | 0.858         |
+#   | night 19-06      | 22 | 22              | 0.028         |
+#   | ADS-B confirmed  |  9 | 0               | >= 0.43       |
+#
+# 0.20 sits in the natural gap between 0.179 and 0.27, rejects 28 of 57 blind detections
+# including all 22 overnight ones, and rejects none of the 9 ADS-B-confirmed matches, whose
+# lowest contrast is 0.43 -- a 2.2x margin. The old 0.35 would have left only 1.24x.
+MIN_COMB_CONTRAST = 0.20
+
+# The waiver that keeps the documented 4 km aircraft. Every one of the 28 low-contrast blind
+# detections scored between 18.0 and 53.9, and the highest matched-filter score anywhere in the
+# 66 stored passes is 77.7 -- so on all the evidence there is, this waiver costs nothing and
+# preserves a case the project has measured. It is deliberately above everything observed and
+# below the 110 of the aircraft that motivated reporting contrast rather than gating it.
+COMB_CONTRAST_WAIVER_SCORE = 80.0
 # CORRECTED against real audio (VALIDATION.md). Epsilon measures *precision*, not
 # aircraft-ness: a noisy fit of a real aeroplane is still a real aeroplane, and gating
 # detection on it conflated "is this an aircraft?" with "is this measurement good enough to do
@@ -846,6 +872,7 @@ def plausible_aircraft(
     min_comb_contrast: float | None = None,
     max_epsilon: float | None = None,
     max_slant_m: float | None = None,
+    template_score: float | None = None,
 ) -> tuple[bool, str]:
     """Whether a blind detection is plausibly an aircraft. Returns (verdict, reason).
 
@@ -856,9 +883,12 @@ def plausible_aircraft(
     arguments, so a deployment or a calibration run can set them once on the module and have
     every caller -- including `detect`, which does not forward them -- pick the new value up.
 
-    `min_comb_contrast` is accepted and **deliberately not applied**; see the note above on why
-    contrast is reported rather than gated. It stays in the signature so a caller that sets it
-    does not break, but setting it has no effect.
+    `min_comb_contrast` **is** applied, as of the fifth station review -- see the note above for
+    the measurement. It is waived for a detection whose `template_score` clears
+    `COMB_CONTRAST_WAIVER_SCORE`, because the matched filter is the more sensitive of the two
+    and a real pass has been measured at contrast zero with a score of 110. A caller that
+    passes no `template_score` gets the gate unwaived, which is the conservative reading: the
+    waiver needs positive evidence, and absence of the score is not evidence.
     """
     min_speed = MIN_AIRCRAFT_SPEED if min_speed is None else min_speed
     min_transition_s = MIN_TRANSITION_S if min_transition_s is None else min_transition_s
@@ -904,4 +934,10 @@ def plausible_aircraft(
             f"beyond the audibility radius ({result.cpa_distance / 1000:.1f} km > "
             f"{max_slant_m / 1000:.0f} km)"
         )
+    # Last of the physical gates, so that "too slow" or "unresolvable" is preferred wherever it
+    # applies: those name what the source is, while this one only says the evidence is absent.
+    if comb < min_comb_contrast and not (
+        template_score is not None and template_score >= COMB_CONTRAST_WAIVER_SCORE
+    ):
+        return False, f"no harmonic comb (contrast {comb:.2f})"
     return True, f"aircraft: {result.speed:.0f} m/s at {result.cpa_distance:.0f} m"

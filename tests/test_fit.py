@@ -452,3 +452,71 @@ def test_a_failed_rewindow_does_not_crash_the_fit(monkeypatch):
     r, truth = run(cpa_distance=600, snr_db=20)
     assert len(calls) >= 2, "the matched-window re-trace never ran, so nothing was tested"
     assert np.isfinite(r.epsilon_ridge) and np.isfinite(r.f0)
+
+
+def test_a_detection_with_no_harmonic_comb_is_rejected():
+    """Overnight false positives are not quiet aircraft; they are not combs at all.
+
+    Measured on 66 live passes: all 22 blind detections between 19:00 and 06:00 sat below 0.20
+    contrast, mean 0.028, against a daytime mean of 0.858 -- and none of the 9 ADS-B-confirmed
+    matches fell below 0.43.
+    """
+    import dataclasses
+
+    r = _good_fit()
+    quiet = dataclasses.replace(r, notes={**r.notes, "comb_score": 0.02})
+    ok, why = fit.plausible_aircraft(quiet)
+    assert not ok and "comb" in why, why
+
+
+def test_a_strong_matched_filter_score_waives_the_comb_gate():
+    """The documented counterexample must survive: a real aircraft at 4 km was detected with a
+    matched-filter score of 110 while its per-frame comb contrast sat at zero. The comb is a
+    per-frame measure and so less sensitive than the detector that found the event."""
+    import dataclasses
+
+    r = _good_fit()
+    quiet = dataclasses.replace(r, notes={**r.notes, "comb_score": 0.0})
+    assert not fit.plausible_aircraft(quiet, template_score=50.0)[0]
+    ok, why = fit.plausible_aircraft(quiet, template_score=110.0)
+    assert ok, f"the measured 4 km aircraft was rejected: {why}"
+
+
+def test_the_comb_gate_is_unwaived_when_no_score_is_offered():
+    """Absence of the matched-filter score is not evidence for the waiver. `cli.cmd_fit` fits
+    raw audio with no detector behind it, so it gets the gate as written."""
+    import dataclasses
+
+    r = _good_fit()
+    quiet = dataclasses.replace(r, notes={**r.notes, "comb_score": 0.01})
+    assert not fit.plausible_aircraft(quiet)[0]
+
+
+def test_the_comb_gate_clears_every_confirmed_match():
+    """The lowest contrast among the station's 9 ADS-B-confirmed passes is 0.43, and the gate
+    must keep a margin below it -- the previous value of 0.35 left only 1.24x."""
+    assert fit.MIN_COMB_CONTRAST < 0.43 / 2.0, (
+        "the gate must stay at least 2x below the lowest confirmed match's contrast"
+    )
+    # and above the junk: the highest contrast among the 28 rejected rows was 0.179
+    assert fit.MIN_COMB_CONTRAST > 0.179
+
+
+def test_the_comb_waiver_sits_above_every_score_observed():
+    """A waiver below the observed range would re-admit the detections the gate exists to
+    remove: the 28 low-contrast rows scored 18.0-53.9, and the highest score in all 66 stored
+    passes is 77.7."""
+    assert fit.COMB_CONTRAST_WAIVER_SCORE > 77.7
+
+
+def test_a_more_specific_rejection_is_preferred_over_the_comb_gate():
+    """A reason names what the source is wherever it can. "too slow" sends the next person to
+    the speed floor; "no harmonic comb" sends them nowhere."""
+    import dataclasses
+
+    r = _good_fit()
+    slow_and_quiet = dataclasses.replace(
+        r, speed=fit.MIN_AIRCRAFT_SPEED - 5.0, notes={**r.notes, "comb_score": 0.0}
+    )
+    ok, why = fit.plausible_aircraft(slow_and_quiet)
+    assert not ok and "too slow" in why, why

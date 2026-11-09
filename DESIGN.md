@@ -169,12 +169,13 @@ its `aircraft.json` before assuming either way.
 ### 3.1a Path B's hard problem is ground sources, not tones
 
 Finding a tone is easy; deciding it is an aircraft is not. `fit.plausible_aircraft` implements
-three independent checks, each physical rather than tuned, and they classify 10/10 correctly
+four independent checks, each physical rather than tuned, and they classify 10/10 correctly
 on synthetic cars, trucks, locomotives and aircraft from 20 to 130 m/s:
 
 | Check | Threshold | Why |
 |---|---|---|
-| **Fit quality** | `ε` ≤ 3.0% | A ground source forced into a flyby model fits badly. 0.02 came from synthetic fits; the real-audio median is 1.22%, and a misfitting car sits at 3.91% (VALIDATION.md). Comb contrast is reported but **not** gated: it is per-frame and less sensitive than the matched filter that found the event |
+| **Fit quality** | `ε` ≤ 3.0% | A ground source forced into a flyby model fits badly. 0.02 came from synthetic fits; the real-audio median is 1.22%, and a misfitting car sits at 3.91% (VALIDATION.md) |
+| **Harmonic comb** | contrast ≥ 0.20, waived at matched-filter score ≥ 80 | Added at the fifth station review. All 22 of the station's overnight blind detections sat below 0.20 (mean 0.028, against 0.858 by day) while none of the 9 ADS-B-confirmed matches fell below 0.43. The waiver keeps a documented true positive — an aircraft at 4 km with contrast **zero** and a score of 110 — because the comb is per-frame and less sensitive than the matched filter that found the event. Checked **last**, so a more specific reason wins wherever one applies |
 | **Resolvability** | `d/v` ≥ 5 s | The sweep takes about `d/v`. A locomotive at 50 m doing 20 m/s completes it in 2.5 s — two or three STFT frames — and came back fitted at **101 m/s** |
 | **Speed** | ≥ 30.0 m/s (58 kt) | Was 35.8 (80 mph), which rejected the station's first ADS-B-confirmed pass at 32.7 m/s. Only one synthetic ground source depends on this gate — a truck fitting at 26.1 m/s — so the usable range is `(26.1, 32.1)` and 30.0 is biased to the ground-source end. The populations genuinely overlap (highway 29–36 m/s, light aircraft approach 28–33), so this is a blind-path floor; the join rescues a slow aircraft ADS-B can vouch for |
 | **Range** | `d` ≤ 8 km | `physics.AUDIBILITY_RADIUS_M`, shared with `adsb.audible_candidates`. Believing a detection at a range you refuse to expect one at is incoherent |
