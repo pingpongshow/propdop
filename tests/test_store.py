@@ -1,6 +1,8 @@
 """Pass database: persistence, product queries, and the shareable report format."""
 
 import numpy as np
+import datetime
+
 import pytest
 
 from propdop import adsb, associate, detect, geo, store, synth
@@ -35,6 +37,19 @@ def populated(world):
     st.add_station(store.Station.from_receiver(RX, microphone="EM272", windscreen="90mm foam"))
     counts = st.record_join("alpha", world, blade_counts={"C172": 2, "BE20": 4})
     return st, counts
+
+
+def _reblob(blob: bytes, **meta_updates) -> bytes:
+    """Rewrite only the metadata of a stored tracks blob, leaving the arrays byte-identical."""
+    import json
+    import zlib
+
+    raw = zlib.decompress(blob)
+    n = int.from_bytes(raw[:4], "big")
+    meta = json.loads(raw[4 : 4 + n])
+    meta.update(meta_updates)
+    head = json.dumps(meta).encode()
+    return zlib.compress(len(head).to_bytes(4, "big") + head + raw[4 + n :], 9)
 
 
 def test_records_matches_unexplained_and_unheard(populated):
@@ -139,7 +154,51 @@ def test_scintillation_by_hour_runs_off_stored_tracks(populated):
     st, _ = populated
     rows = st.scintillation_by_hour()
     assert rows
-    assert all(set(r) == {"hour_utc", "n", "mean_log_amp_var"} for r in rows)
+    assert all(
+        set(r) == {"hour_local", "n", "mean_log_amp_var", "n_below_noise"} for r in rows
+    )
+
+
+def test_a_variance_below_its_own_noise_bias_is_excluded_not_published_as_negative(populated):
+    """A variance cannot be negative, so publishing one is always a defect.
+
+    Subtracting the in-band noise bias unconditionally produced exactly that on low-SNR
+    passes: 11 of 80 stored passes came out negative, the worst at -82.7 against a real
+    daytime signal spanning 0.4 to 1.3. The guard is the same one
+    `fit.CombFit.scintillation_scaling` already applied per harmonic.
+    """
+    st, _ = populated
+    # Force every stored pass below the guard by raising its noise bias far above any
+    # plausible variance; nothing should survive, and nothing should go negative.
+    for row in st.query_all("SELECT pass_id, tracks FROM passes WHERE tracks IS NOT NULL"):
+        meta = store.unpack_tracks(row["tracks"])["meta"]
+        blob = _reblob(row["tracks"], noise_bias={k: 1e6 for k in meta["noise_bias"]})
+        st.conn.execute(
+            "UPDATE passes SET tracks = ? WHERE pass_id = ?", (blob, row["pass_id"])
+        )
+    st.conn.commit()
+    rows = st.scintillation_by_hour()
+    assert rows, "an hour whose every pass was excluded must still be reported"
+    assert all(r["n"] == 0 for r in rows)
+    assert all(r["mean_log_amp_var"] is None for r in rows)
+    assert sum(r["n_below_noise"] for r in rows) > 0
+    # the point of the whole test
+    assert not any(
+        r["mean_log_amp_var"] is not None and r["mean_log_amp_var"] < 0.0 for r in rows
+    )
+
+
+def test_the_hour_is_local_because_the_diurnal_cycle_follows_the_local_sun(populated):
+    """Read in UTC, the convective afternoon can land in the small hours.
+
+    Wherever the two differ, the plot cannot be read against the expectation it exists to
+    test, so the hour must follow the machine's own clock.
+    """
+    st, _ = populated
+    rows = st.scintillation_by_hour()
+    t = st.query_one("SELECT MIN(t_heard_cpa) FROM passes WHERE tracks IS NOT NULL")[0]
+    expected = datetime.datetime.fromtimestamp(t).hour
+    assert expected in {r["hour_local"] for r in rows}
 
 
 # -- sharing ---------------------------------------------------------------------------

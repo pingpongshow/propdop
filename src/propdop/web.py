@@ -1089,6 +1089,9 @@ def create_app(db_path: str | Path = ":memory:") -> "FastAPI":
             em = db.error_model()
             trend = db.epsilon_trend()
             hours = db.scintillation_by_hour()
+            usable_hours = [h for h in hours if h["n"]]
+            n_below = sum(h["n_below_noise"] for h in hours)
+            n_scint = n_below + sum(h["n"] for h in hours)
             eps_med = em.get("epsilon_median")
 
             frag = _live_fragments(db, initial=True)
@@ -1195,10 +1198,15 @@ important number here: smartphone-grade to good-recording-grade fits is a ~20x d
 <h2>Measured error against ADS-B</h2>
 {err}
 <h2>Turbulence</h2>
-{line_svg([h["hour_utc"] for h in hours], [h["mean_log_amp_var"] for h in hours],
-          label="log-amplitude variance by hour UTC", xlabel="hour", ylabel="variance")}
+{line_svg([h["hour_local"] for h in usable_hours],
+          [h["mean_log_amp_var"] for h in usable_hours],
+          label="log-amplitude variance by local hour", xlabel="hour (local)",
+          ylabel="variance")}
 <p class="note">A real turbulence signal should show a large diurnal swing and scale as
-f^(7/6) across harmonics. Absence is a decisive negative, not a null result.</p>
+f^(7/6) across harmonics. Absence is a decisive negative, not a null result.
+{n_below} of {n_scint} passes with tracks are excluded here because their raw log-amplitude
+variance does not clear their own in-band noise bias: on those the measurement is of SNR, not
+of the atmosphere, and the noise-corrected value comes out negative.</p>
 {LIVE_SCRIPT}"""
             return _chrome("PropDop", body, live)
         finally:

@@ -18,6 +18,7 @@ deployed stations than to get right now:
 from __future__ import annotations
 
 import base64
+import datetime
 import io
 import json
 import sqlite3
@@ -601,29 +602,59 @@ class Store:
             for r in rows
         ]
 
-    def scintillation_by_hour(self) -> list[dict]:
-        """Log-amplitude variance by hour of day: the free diurnal test for turbulence.
+    def scintillation_by_hour(self, min_snr_margin: float = 1.5) -> list[dict]:
+        """Log-amplitude variance by **local** hour: the free diurnal test for turbulence.
 
         SCINTILLATION.md 7 predicts a ~150x swing at matched geometry. This is the query that
         either shows it or kills the idea.
+
+        Two details here are not cosmetic.
+
+        The hour is *local*. The cycle being tested is driven by the sun over this station, so
+        in UTC the convective afternoon lands in the small hours and the plot cannot be read
+        against the expectation it exists to test.
+
+        And a pass is included only if its raw variance clears its own noise bias by
+        `min_snr_margin` -- the same guard, for the same reason, that
+        `fit.CombFit.scintillation_scaling` applies per harmonic: below it the subtraction
+        exceeds the signal, so the "variance" comes out negative and what is being measured is
+        SNR, not the atmosphere. This query used to subtract unconditionally. Measured on 80
+        stored passes, 11 came out negative and the worst was -82.7 against a real daytime
+        signal spanning 0.4 to 1.3 -- a single impossible value set the y-range and flattened
+        the diurnal swing into a flat line, which is how the defect was noticed.
+
+        Hours whose every pass fell below the guard are still reported, with `n` 0 and a null
+        mean, because "no usable passes this hour" and "no passes this hour" are different
+        facts and the second should not be able to impersonate the first.
         """
         rows = self.query_all(
             "SELECT t_heard_cpa, fit_slant_m, tracks FROM passes WHERE tracks IS NOT NULL"
         )
         by_hour: dict[int, list[float]] = {}
+        below: dict[int, int] = {}
         for r in rows:
             data = unpack_tracks(r["tracks"])
             ks = data["meta"]["harmonics"]
             if not ks:
                 continue
             x = data[f"la{ks[0]}"]
-            n = max(1, x.size // 8)
-            var = float(np.var(x[n:-n])) - float(data["meta"]["noise_bias"].get(str(ks[0]), 0.0))
-            hour = int((r["t_heard_cpa"] // 3600) % 24)
-            by_hour.setdefault(hour, []).append(var)
+            raw = float(np.var(x[fit._trim(x.size)]))
+            bias = float(data["meta"]["noise_bias"].get(str(ks[0]), 0.0))
+            hour = datetime.datetime.fromtimestamp(r["t_heard_cpa"]).hour
+            if not raw > min_snr_margin * bias:
+                below[hour] = below.get(hour, 0) + 1
+                continue
+            by_hour.setdefault(hour, []).append(raw - bias)
         return [
-            {"hour_utc": h, "n": len(v), "mean_log_amp_var": float(np.mean(v))}
-            for h, v in sorted(by_hour.items())
+            {
+                "hour_local": h,
+                "n": len(by_hour.get(h, ())),
+                "mean_log_amp_var": (
+                    float(np.mean(by_hour[h])) if by_hour.get(h) else None
+                ),
+                "n_below_noise": below.get(h, 0),
+            }
+            for h in sorted(set(by_hour) | set(below))
         ]
 
     def detection_envelope(self, n_sectors: int = 16) -> list[dict]:

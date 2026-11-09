@@ -267,3 +267,35 @@ Closing that is the obvious next refinement.
 
 Steps 1–3 are a weekend of analysis on data the project collects anyway, and they answer whether the rest
 is worth doing.
+
+## What the sixth review found: two defects between the measurement and the plot
+
+The within-pass analysis was right; the dashboard query that aggregates it was not. Both
+defects were found because the plot disagreed with an expectation that turned out to be
+correct — convective turbulence should rise into the late afternoon, and the plot was flat.
+
+**The noise-bias subtraction ran unguarded.** `CombFit.scintillation_scaling` excludes any
+harmonic whose raw log-amplitude variance does not clear its own in-band noise bias by 1.5x,
+because below that the measurement is of SNR rather than of the atmosphere. The hourly
+aggregation subtracted the bias unconditionally. Measured on 80 stored passes, **11 came out
+negative** — a variance cannot be — with the worst at **-82.7** against a real daytime signal
+spanning 0.4 to 1.3. A single impossible value set the y-range, so the signal occupied about
+3% of the plot height and read as a flat line. The fix applies the existing guard, which
+excludes 17 of 80 passes, and reports per-hour how many were excluded so that "no usable
+passes this hour" cannot impersonate "no passes this hour".
+
+**The axis was UTC while the rest of the dashboard is local.** The cycle under test is driven
+by the sun over the station, so west of Greenwich the convective afternoon landed in the small hours of the
+plot and could not be read against the expectation it exists to test.
+
+With both fixed, one day of passes (n=80, 17 excluded) gives:
+
+| local hour | 05 | 08 | 09 | 10 | 12 | 13 | 14 | 15 | 16 | 17 | 20 | 21 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| mean var | 0.25 | 1.22 | 0.51 | 0.81 | 0.97 | 0.96 | 0.97 | 0.71 | **1.32** | 1.07 | 0.94 | 0.72 |
+
+The late-afternoon maximum is where it is expected. It is **not yet a diurnal detection**: the
+swing is about 5x where SCINTILLATION.md 7 predicts ~150x at matched geometry, this is a
+single day, several hours rest on one or two passes, and the geometries are not matched — the
+contributing slant ranges from 258 m to 16 km, which dominates the variance. The honest claim
+is that the plot is now readable and is not inconsistent with the prediction.

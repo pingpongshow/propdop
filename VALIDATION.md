@@ -477,7 +477,7 @@ clips "join to their own ADS-B track"; in the deployed code they could not. Engi
 decides only whether a miss counts, never whether a match may be made.
 ## What the fourth review found
 
-The fourth review (2026-11-08, 10:29 PST) went looking for passes. It found five defects, four
+The fourth review (2026-11-08, mid-morning local time) went looking for passes. It found five defects, four
 of them landing on the one number that is supposed to summarise the instrument — the detection
 rate — and pushing it in both directions at once. It read 17.4 %. Neither the direction nor the
 size of the error was guessable from the figure.
@@ -816,3 +816,47 @@ What this does **not** do is explain the overnight detections. It removes them f
 published product, which is the right call for an instrument whose one unaffordable error is a
 false "non-cooperative aircraft", but a contrast near zero with an epsilon near 2 % is still an
 unexplained signal. It is now filed rather than published.
+
+## The temperature readout, and what it is actually measuring
+
+Noticed from outside the instrument: the sounding reported temperatures aloft of 67 to 133 C
+on a day with a ~60 F (15.6 C) surface. Those are not temperatures, and the chain that
+produces them is worth writing down because the number is the most legible readout of a bias
+measured three other ways.
+
+`c_eff_from_speed_bias` recovers the effective sound speed from the *disagreement* between the
+acoustic speed and the ADS-B speed, and `temperature_from_c` inverts the dry-air relation. The
+gain is brutal: around 340 m/s, **1% of speed error is about 3.4 m/s of c_eff and ~5.8 C of
+implied temperature.** DESIGN's "1 m/s of wind or 1.7 C of temperature per pass" is stated per
+m/s of c and is correct; expressed per percent of the *speed* observable, which is what is
+actually biased, it is three and a half times larger.
+
+Measured over the 11 stored matches:
+
+| | mean | median | sign |
+|---|---|---|---|
+| speed, fit vs ADS-B | **-7.5%** | -7.2% | 10 of 11 negative |
+| slant, fit vs ADS-B | **-21.3%** | -20.8% | 11 of 11 negative |
+| implied c_eff | 372.7 m/s | 369.8 m/s | vs 340.6 at 15.6 C |
+| implied temperature | — | **67 C** | worst pass 198 C |
+
+Three things follow.
+
+**The temperature is the speed bias, amplified.** The worst pass for temperature (198 C) is
+the worst pass for speed (-21.2%); the one pass whose speed came out *high* (+2.2%) implies
+7.1 C, which is plausible. Nothing separate is broken in the sounding.
+
+**The bias is not one common scale error.** This is new and it constrains the hypotheses. The
+slant bias is **2.8x the speed bias** and is 11 of 11 against 10 of 11. A single multiplicative
+error in the time axis or the sample rate would move both together. It does not: the total
+pitch drop, which carries speed, is nearly unbiased, while the transition sharpness, which
+carries slant, is biased hard. Whatever the cause, it lives mostly in the transition width.
+Three hypotheses have already failed when measured (octave slip, held positions,
+over-smoothed ADS-B); this is a constraint on the fourth, not a fourth.
+
+**Wind is not affected and temperature absorbs all of it.** The layer solve's design matrix
+has a constant column for `c0` and two wind columns in `cos(elevation)cos(bearing - .)`. A
+common-mode offset in `c_eff` projects predominantly onto the constant column, which is
+exactly the parameter the temperature is read from. So the published wind survives the bias
+and the published temperature does not — the opposite of a product that should be presented
+with equal confidence.
