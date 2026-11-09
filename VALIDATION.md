@@ -882,3 +882,30 @@ alone is the wrong remedy.
 
 The row stays visible on the dashboard, labelled suppressed and carrying its reason. A product
 withdrawn silently is worse than one published wrong, because nobody can ask why it went.
+
+### A free diagnostic the suppression surfaced
+
+Publishing the effective sound speed per layer instead of the temperature made the bias
+legible in a way the temperature never was, because sound speed has a known vertical
+structure to violate. From the first 11 matches:
+
+| layer | n | effective sound speed |
+|---|---|---|
+| 0–1,000 m | 11 | 360.0 ± 3.4 m/s |
+| 1,000–2,000 m | 5 | 404.0 ± 10.2 m/s |
+
+Air cools with height, so `c` should **fall** by roughly 3 m/s per km. It rises by 44. Both
+layers also sit above 355 m/s, which is dry air at +45 °C, so neither is a possible atmosphere
+and the upper one is not close. Wind cannot explain it: the layer solve fits wind per layer, so
+`c0` is already wind-free by construction.
+
+This says the bias is **altitude-dependent, and grows with height** — a constraint on the
+cause, not a cause. It is not simply a function of slant range: the pass with the largest slant
+(5,788 m) has the *smallest* slant error of the eleven (−6.3 %), while a 2,847 m pass has the
+largest (−42.4 %). Four hypotheses have now been measured and failed. This is the fifth
+measurement, not a fifth hypothesis.
+
+Two honest limits on the surviving products while n is 11. The published wind is
+16.3 m/s ± 30.3 — the uncertainty **exceeds the quantity**, so "wind is unaffected by this
+bias" must not be read as "wind is measured". And the layer rows above rest on 11 and 5 passes.
+Both need the same 20–30 matches the slant bias does.
