@@ -451,7 +451,21 @@ class Store:
         n_matched = n_unexplained = 0
         for m in result.matches:
             tc = m.geometry.track.type_code if m.geometry.track else None
-            n = blade_counts.get(tc)
+            ec = m.geometry.track.engine_class if m.geometry.track else None
+            # Per-pass first. A propeller has a hard RPM ceiling, so for most fundamentals only
+            # one blade count puts the implied RPM in a cruise band -- which identifies N from
+            # *this* pass and needs no repeats. Pooling by type code was both slower and wrong:
+            # it needed 8 passes of one type, and blades are a property of the airframe, not
+            # the type. Measured on the first four BE95 passes, from three airframes: one sits
+            # repeatably at 112.1/112.9 Hz and another at 76.8 Hz, a ratio of 1.465 against the
+            # 1.465 that (3/2) x (2250/2304) predicts. Two-blade and three-blade props on one
+            # ICAO type, which the pooled inference averaged into a single confident N=3 --
+            # putting the two-blade airframe at a fictional 1,535 RPM.
+            n, _rpm = adsb.blade_count_from_f0(m.detection.fit.f0, ec) if m.detection.fit else (None, None)
+            source = "f0-band" if n else None
+            if n is None:
+                n = blade_counts.get(tc)
+                source = "type-pooled" if n else None
             # A match whose own screening said "not an aircraft" is kept -- ADS-B is better
             # evidence than a self-assessed fit residual -- but the disagreement is recorded.
             # These rows are the only honest way to recalibrate `plausible_aircraft`: each one
@@ -465,7 +479,7 @@ class Store:
                 m.detection,
                 match=m,
                 blade_count=n,
-                blade_source="inferred" if n else None,
+                blade_source=source,
                 surface=surface,
                 clock_offset_s=result.clock_offset_s,
                 notes=screened_out,

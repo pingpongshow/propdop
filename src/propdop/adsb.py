@@ -560,6 +560,55 @@ def infer_blade_count(
     return best, scores
 
 
+# Cruise RPM bands by engine class, for single-pass blade-count inference.
+#
+# Only piston is listed, deliberately. A turboprop holds a constant-speed prop at 1,600-2,000
+# RPM, which this band rejects outright -- and rejecting is the safe failure. Admitting it
+# without widening carefully is not: a 4-blade turboprop at 1,700 RPM puts f0 at 113.3 Hz, and
+# 113.3 Hz read as 3 blades lands at 2,267 RPM, inside the piston band. That is a wrong answer
+# delivered confidently, which is worse than none, so `None` is returned for every class but
+# piston until a turboprop band is chosen against real turboprop passes.
+CRUISE_RPM_BANDS: dict[str, tuple[float, float]] = {
+    "P": (2100.0, 2750.0),
+}
+
+
+def blade_count_from_f0(
+    f0: float, engine_class: str | None, bands: dict[str, tuple[float, float]] | None = None
+) -> tuple[int | None, float | None]:
+    """Blade count from a *single* pass, by eliminating the physically impossible.
+
+    N is not in ICAO Doc 8643, so `f0 = N * RPM / 60` cannot be solved directly. But a
+    propeller has a hard upper limit -- tip speed -- and piston cruise sits in a narrow band.
+    Across the candidate blade counts only some put the implied RPM inside that band, and
+    where exactly one does, N is determined by one pass. No repeat passes are needed.
+
+    Worked on real passes: 118.9 Hz is 3,567 RPM on two blades, which no certified piston
+    reaches, and 2,378 on three. Three blades, from one pass.
+
+    **Uniqueness is not free, and this is the subtle part.** It holds only while the band is
+    narrower than the ratio between adjacent blade counts, and that ratio *shrinks* with N:
+    3/2 is 1.50 but 5/4 is only 1.25, against a band spanning 2750/2100 = 1.31. So the piston
+    band separates 2 from 3 and 3 from 4, and genuinely cannot separate 4 from 5 between 175
+    and 183 Hz, nor 5 from 6 between 210 and 229 Hz. Those windows are real traffic -- a
+    181.1 Hz detection is already in the corpus. Hence the explicit ambiguity check: two
+    candidates in band returns `None`, and widening the band silently moves these windows
+    rather than removing them.
+
+    Returns `(N, implied RPM)`, or `(None, None)` when nothing or more than one thing fits.
+    """
+    band = (bands or CRUISE_RPM_BANDS).get((engine_class or "").upper())
+    if band is None or not np.isfinite(f0) or f0 <= 0.0:
+        return None, None
+    lo, hi = band
+    fits = [
+        (n, 60.0 * float(f0) / n) for n in (2, 3, 4, 5, 6) if lo <= 60.0 * float(f0) / n <= hi
+    ]
+    if len(fits) != 1:
+        return None, None
+    return fits[0]
+
+
 def rpm_from_f0(f0: float, n_blades: int) -> float:
     return float(physics.rpm_from_blade_pass(f0, n_blades))
 

@@ -539,7 +539,7 @@ def _product_rows(db: store.Store) -> list[dict]:
             20,
             f"{rpm_rows} pass(es) with RPM"
             + (f"; blade count inferred for {len(blades)} type(s)" if blades else ""),
-            "precision equals epsilon; needs blade count, which no standard table carries",
+            "precision equals epsilon; blade count is not in any standard table, so it is solved per pass from the RPM ceiling (piston only)",
         ),
         row(
             "Speed / slant range",

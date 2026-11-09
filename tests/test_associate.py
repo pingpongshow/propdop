@@ -514,3 +514,82 @@ def test_the_noise_estimator_is_only_valid_while_the_aircraft_is_not_manoeuvring
     assert adsb._position_sigma_m(turning) > 10.0 * 5.0, (
         "a turn reads as noise; if this ever fails the estimator was improved -- "
         "re-measure the live distribution before trusting the ceiling less")
+
+
+# -- blade count from one pass ----------------------------------------------------------
+
+
+def test_one_pass_identifies_the_blade_count_by_eliminating_the_impossible():
+    """A propeller has a hard RPM ceiling, and that is enough to solve f0 = N*RPM/60.
+
+    These are the nine fundamentals of the first nine ADS-B-matched passes. Every one resolves
+    from a single pass, which is why the old requirement of eight passes sharing a type code
+    was not just slow but unnecessary.
+    """
+    from propdop import adsb as a
+
+    cases = {
+        72.4: (2, 2172.0),
+        76.8: (2, 2304.0),
+        83.9: (2, 2517.0),
+        91.0: (2, 2730.0),
+        112.1: (3, 2242.0),
+        112.9: (3, 2258.0),
+        117.2: (3, 2344.0),
+        118.9: (3, 2378.0),
+        125.8: (3, 2516.0),
+    }
+    for f0, (n, rpm) in cases.items():
+        got_n, got_rpm = a.blade_count_from_f0(f0, "P")
+        assert got_n == n, f0
+        assert got_rpm == pytest.approx(rpm, abs=1.0)
+
+
+def test_the_same_type_code_can_carry_two_different_blade_counts():
+    """Why per-pass beats pooling by type, measured on real passes rather than argued.
+
+    Three BE95 airframes gave 76.8, 112.1 and 112.9 Hz. Pooled, the inference picked a single
+    N=3 for the type and put the 76.8 Hz airframe at a fictional 1,535 RPM. Per pass, each
+    airframe gets the blade count its own fundamental implies.
+    """
+    from propdop import adsb as a
+
+    assert a.blade_count_from_f0(76.8, "P")[0] == 2
+    assert a.blade_count_from_f0(112.1, "P")[0] == 3
+    assert a.blade_count_from_f0(112.9, "P")[0] == 3
+
+
+@pytest.mark.parametrize("f0", [176.0, 181.1, 183.0, 211.0, 220.0, 228.0])
+def test_it_refuses_where_the_band_cannot_separate_adjacent_blade_counts(f0):
+    """Uniqueness is not free: the band must be narrower than the ratio between adjacent N.
+
+    3/2 is 1.50 and the piston band spans 2750/2100 = 1.31, so 2-against-3 separates. But 5/4
+    is only 1.25, so 4-against-5 does not, between 175 and 183 Hz; nor 5-against-6, between
+    210 and 229 Hz. A 181.1 Hz detection is already in the corpus, so this is real traffic and
+    not a corner case. Widening the band moves these windows, it does not remove them.
+    """
+    from propdop import adsb as a
+
+    assert a.blade_count_from_f0(f0, "P") == (None, None)
+
+
+def test_a_turboprop_gets_no_answer_rather_than_a_wrong_one():
+    """A 4-blade turboprop at 1,700 RPM puts f0 at 113.3 Hz, which the piston band reads as
+    three blades at 2,267 RPM -- confidently wrong. Only piston has a band until a turboprop
+    one is chosen against real turboprop passes."""
+    from propdop import adsb as a
+
+    assert a.blade_count_from_f0(113.3, "T") == (None, None)
+    assert a.blade_count_from_f0(113.3, None) == (None, None)
+    # and the trap it is avoiding is real: read as piston, that same tone resolves
+    assert a.blade_count_from_f0(113.3, "P") == (3, pytest.approx(2267.0, abs=1.0))
+
+
+def test_a_fundamental_outside_every_band_gets_no_answer():
+    """Low cruise or a descent can put the implied RPM below the band for every N. Refusing is
+    correct: nothing else in band means nothing to be wrong about."""
+    from propdop import adsb as a
+
+    assert a.blade_count_from_f0(63.3, "P") == (None, None)
+    assert a.blade_count_from_f0(0.0, "P") == (None, None)
+    assert a.blade_count_from_f0(float("nan"), "P") == (None, None)

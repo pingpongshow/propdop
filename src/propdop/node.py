@@ -105,9 +105,10 @@ class ClockModel:
         """
         self._obs_frames.append(int(frame))
         self._obs_times.append(float(wall_time))
-        if len(self._obs_frames) >= self.warmup_obs + 3:
-            f = np.array(self._obs_frames[self.warmup_obs :], dtype=float)
-            t = np.array(self._obs_times[self.warmup_obs :], dtype=float)
+        obs = list(zip(self._obs_frames, self._obs_times))[self.warmup_obs :]
+        if len(obs) >= 3:
+            f = np.array([o[0] for o in obs], dtype=float)
+            t = np.array([o[1] for o in obs], dtype=float)
             slope, intercept = np.polyfit(f, t, 1)
             if slope > 0:
                 self.rate = 1.0 / slope
@@ -119,10 +120,23 @@ class ClockModel:
 
     @property
     def residual_s(self) -> float:
-        if len(self._obs_frames) < self.warmup_obs + 3:
+        """How well the linear clock model holds, in seconds.
+
+        Read from the status thread while `observe` appends from the capture thread, so the
+        two lists must be paired before either is sliced. Slicing them separately is not a
+        theoretical race: it raised
+
+            ValueError: operands could not be broadcast together with shapes (30005,) (30004,)
+
+        out of `_write_status`, which cost that cycle's status file and left the dashboard
+        stale. `zip` stops at the shorter iterator, so a half-finished append is simply not
+        seen rather than seen as a length mismatch.
+        """
+        obs = list(zip(self._obs_frames, self._obs_times))[self.warmup_obs :]
+        if len(obs) < 3:
             return float("nan")
-        f = np.array(self._obs_frames[self.warmup_obs :], dtype=float)
-        t = np.array(self._obs_times[self.warmup_obs :], dtype=float)
+        f = np.array([o[0] for o in obs], dtype=float)
+        t = np.array([o[1] for o in obs], dtype=float)
         return float(np.std(t - self.time_of(f)))
 
 

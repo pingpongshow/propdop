@@ -899,13 +899,124 @@ layers also sit above 355 m/s, which is dry air at +45 °C, so neither is a poss
 and the upper one is not close. Wind cannot explain it: the layer solve fits wind per layer, so
 `c0` is already wind-free by construction.
 
-This says the bias is **altitude-dependent, and grows with height** — a constraint on the
-cause, not a cause. It is not simply a function of slant range: the pass with the largest slant
-(5,788 m) has the *smallest* slant error of the eleven (−6.3 %), while a 2,847 m pass has the
-largest (−42.4 %). Four hypotheses have now been measured and failed. This is the fifth
-measurement, not a fifth hypothesis.
+This looked like an altitude dependence, and **the sixth review measured it per pass and it is
+not one.** Spearman rho between the per-pass slant error and ADS-B AGL is **+0.04** over twelve
+matches — nothing. The layer figures above are an artifact of the weighted inversion at small
+n: the upper layer rested on five passes, and the worst-biased pass of the twelve sits at
+761 m, among the lowest. The claim is withdrawn; the table is kept because the values are
+real and still impossible, which is the part that holds.
 
 Two honest limits on the surviving products while n is 11. The published wind is
 16.3 m/s ± 30.3 — the uncertainty **exceeds the quantity**, so "wind is unaffected by this
 bias" must not be read as "wind is measured". And the layer rows above rest on 11 and 5 passes.
 Both need the same 20–30 matches the slant bias does.
+
+## What the sixth review found (the comb gate's first night)
+
+### The gate did not fire, and the premise it was sized on did not recur
+
+Zero `unheard` rows carry a comb rejection reason. Not one. But the gate *is* being reached:
+of 14 blind passes stored overnight, **none** has contrast below 0.20, which is exactly what
+the gate guarantees. It rejected nothing because nothing arrived to reject.
+
+That is the finding, and it is not the one the gate was deployed to produce. Compare the two
+nights, same hours, same site:
+
+| night | n | comb contrast | mean |
+|---|---|---|---|
+| Nov 7–8 (pre-gate) | 20 | −0.04 to 0.18 | 0.03 |
+| Nov 8–9 (gate live) | 14 | **0.21 to 1.33** | **0.61** |
+
+A twenty-fold shift in the quantity the threshold was placed on, overnight. The 0.20 value was
+chosen to sit in an apparent gap between 0.179 and 0.27 in a sample whose entire night
+population was near zero. Last night's night population straddles it, and one pass sits at
+**0.21 — one hundredth above the threshold**. Fit quality moved the same way: overnight
+epsilon ran 0.012–0.030 on the first night and 0.0042–0.0250 on the second.
+
+So **the gate is unvalidated**. It has never rejected anything, the waiver has never been
+exercised, and the distribution it was fitted to has not reappeared. Two readings are
+consistent with the data: either the first night was anomalous and 0.20 sits at the bottom
+edge of the real distribution rather than in a gap, or the second night was. One night of each
+cannot say. The threshold should not move again until a night like the first recurs with the
+gate live, because moving it now would be fitting to whichever night is in hand.
+
+### Nothing real was suppressed, because nothing was suppressed
+
+No comb rejection carries an `icao24`, so no genuine ADS-B arrival was refused. There are no
+comb rejections at all, so there is also no maximum template score among them to compare
+against the waiver at 80 — the question the waiver was sized for stays open.
+
+### The non-convergence counter earned itself in one reading
+
+`spline_nonconvergence` reports **3** over 8.85 h of uptime and 106 analyses. The log holds
+**2** matching lines, one of each FITPACK wording. That gap of one *is the defect the counter
+was built for*: Python prints a warning once per (location, message) per process, so two
+distinct messages print twice however often they recur. Counting 3 against 2 printed is the
+counter working, not disagreeing.
+
+### The slant bias, now characterised rather than hypothesised
+
+n is 12 (was 9). The bias survives, slightly worse: **slant −22.9 %, 12 of 12 negative**;
+speed −8.6 %, 11 of 12; time +1.23 s. Four measurements that constrain the cause, with the
+circular one named and excluded:
+
+1. **It is one error, not two.** Spearman rho between the slant error and the speed error is
+   **+0.895**. Earlier this was read as two errors because slant is biased 2.8x harder than
+   speed; the rank correlation says one error with a gain ratio, which is a different thing.
+2. **It is multiplicative, not additive.** As a ratio, `fit/true` slant is 0.771 with a
+   coefficient of variation of **0.161**. As an offset it is −543 m with a cv of **0.869**.
+   A fixed fraction describes it five times better than a fixed distance.
+3. **It is not geometry and not fit quality.** rho against AGL +0.04, against slant −0.20,
+   against elevation +0.01, against f0 +0.03, against epsilon +0.10. All nil.
+4. **The chi correlation is circular and proves nothing.** rho against `match_chi` is −0.811,
+   which looks like the strongest signal here until you read `_chi`: it is built from
+   `(det.cpa_distance - geom.slant_cpa_m) / geom.slant_cpa_m`, which *is* the slant error.
+   Recorded so the next reader does not spend the same hour on it.
+
+A near-constant multiplicative factor, independent of range, height, angle, frequency, speed
+and fit quality. Still no fifth hypothesis; this is the fifth measurement.
+
+### A thread race in the clock model, found in `last_error`
+
+`ClockModel.residual_s` built two NumPy arrays from two separate list slices while the capture
+thread appended to both, and raised
+
+    ValueError: operands could not be broadcast together with shapes (30005,) (30004,)
+
+out of `_write_status` — a one-element tear, which is the signature of a single append landing
+between the two reads. It cost that cycle's status file and left the dashboard stale. Both
+`residual_s` and `observe` now pair the lists with `zip` before slicing, so a half-finished
+append is not seen at all rather than seen as a length mismatch.
+
+### Blade count: solvable from one pass, and it was never a sample-size problem
+
+Propeller RPM had never been computed for a single pass of 81. The cause was
+`infer_blade_counts`, which required **eight passes sharing a `type_code`** before it would
+name a blade count, and `type_code` exists only on ADS-B-matched passes: 9 of 81, best type at
+4. So the dict was empty, no blade count was stored, and `rpm` stayed null everywhere.
+
+It was also about to produce a wrong answer. The four BE95 passes come from three airframes.
+One sits repeatably at 112.1 and 112.9 Hz, another at 76.8 Hz — a ratio of 1.465, against the
+1.465 that (3/2) x (2250/2304) predicts. That is a two-blade prop and a three-blade prop on the
+same ICAO type, ordinary after a prop STC. Pooled by type the inference picked N=3 and the
+separation test waved it through at 27x the 1.5x it asks for, which would have put the
+two-blade airframe at a fictional 1,535 RPM for every pass it ever makes.
+
+The fix is to stop averaging and start eliminating. A propeller has a hard RPM ceiling, so for
+most fundamentals only one blade count puts the implied RPM inside a cruise band, and **that
+identifies N from one pass**. All nine typed fundamentals in the corpus resolve this way, at
+2,172–2,730 RPM on two blades and 2,242–2,516 on three, and the BE95 type splits into its two
+real configurations instead of being averaged into neither.
+
+Uniqueness is the part that needs care, and it is not free. It holds only while the band is
+narrower than the ratio between adjacent blade counts, and **that ratio shrinks with N**: 3/2
+is 1.50, but 5/4 is 1.25 against a band spanning 2750/2100 = 1.31. So the piston band separates
+2 from 3 and 3 from 4, and cannot separate 4 from 5 between 175 and 183 Hz, nor 5 from 6
+between 210 and 229 Hz. A 181.1 Hz detection is already in the corpus, so those windows are
+real traffic. Two candidates in band returns nothing, and widening the band moves the windows
+rather than removing them.
+
+Turboprops get no answer at all rather than a wrong one. A constant-speed prop runs 1,600–2,000
+RPM, outside the piston band, and a 4-blade turboprop at 1,700 RPM puts f0 at 113.3 Hz — which
+the piston band resolves to three blades at 2,267 RPM. Only `P` has a band until a turboprop
+one is chosen against real turboprop passes, of which there are none yet.
