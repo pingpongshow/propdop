@@ -38,7 +38,7 @@ passes** than stated ([VALIDATION.md](VALIDATION.md)).
 ## Status — read this before believing anything
 
 **Tested against real recordings**, not only its own synthetics — see
-[VALIDATION.md](VALIDATION.md). On 2,135 clips of AeroSonicDB (YPAD-0523), at the deployed
+[VALIDATION.md](VALIDATION.md), and [FINDINGS.md](FINDINGS.md) for the full write-up of what worked, what did not, and which plausible ideas failed when measured. On 2,135 clips of AeroSonicDB (YPAD-0523), at the deployed
 settings:
 
 | | |
@@ -200,6 +200,7 @@ the same axes, so it degrades rather than disappearing.
 | [BUILD.md](BUILD.md) | What is built, what is cut, and the retention policy |
 | [DESIGN.md](DESIGN.md) | Architecture, detection paths, hardware, data model |
 | [APPLICATIONS.md](APPLICATIONS.md) | The science, with derivations and honest precision |
+| [FINDINGS.md](FINDINGS.md) | **The experimental report — positive and negative results, how each was tested, and the traps** |
 | [VALIDATION.md](VALIDATION.md) | Measured against real recordings, including what failed |
 | [PRIOR-ART.md](PRIOR-ART.md) | What already exists, and whether researchers would care |
 | [SCINTILLATION.md](SCINTILLATION.md) | Turbulence from tonal scintillation, worked up |
